@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>AsyncInput</AssemblyName>
+    <RootNamespace>AsyncInput.Mobile</RootNamespace>
+    <Version>1.0.0</Version>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Optimize>true</Optimize>
+    <DebugType>embedded</DebugType>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Analyzer Include="..\References\StArray.ModManager.Analyzer.dll" />
+    <Reference Include="StArray.ModManager">
+      <HintPath>..\References\StArray.ModManager.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="StArray.ModManager.Android">
+      <HintPath>..\References\StArray.ModManager.Android.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ImGui.NET">
+      <HintPath>..\References\ImGui.NET.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

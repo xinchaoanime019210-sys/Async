@@ -1,0 +1,1290 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>StArray.ModManager</name>
+    </assembly>
+    <members>
+        <member name="F:StArray.ModManager.AssemblyEmitter.OutputName">
+            <summary>Assembly, mod id and folder name of the generated output.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.GenerateToMods(System.String)">
+            <summary>
+            Generates the assembly as a self-contained mod inside <paramref name="modsDirectory"/>,
+            laid out as <c>&lt;mods&gt;/UnmanagedTypeAssembly/UnmanagedTypeAssembly.dll</c> — the
+            folder-name-matches-dll-name shape ModLoader looks for.
+            </summary>
+            <returns>The mod folder, or null if generation failed.</returns>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.GenerateToDir(System.String,System.Boolean)">
+            <param name="outputDir">Directory the assembly is written to; created if missing.</param>
+            <param name="asModDll">
+            When true the output also carries an <see cref="T:StArray.ModManager.Runtime.IModPlugin"/> entry point, so the DLL can be
+            dropped straight into a Mods folder and loaded. When false it is a plain stub assembly,
+            only useful as a compile-time reference.
+            </param>
+            <returns>Path of the written assembly, or null if generation failed.</returns>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.EmitModEntryPoint(System.Reflection.Emit.PersistedAssemblyBuilder)">
+            <summary>
+            Emits a minimal <see cref="T:StArray.ModManager.Runtime.IModPlugin"/> implementation so ModLoader can pick the assembly
+            up: it scans for the first concrete IModPlugin type and instantiates it with a
+            parameterless constructor, reading the metadata off these properties.
+            OnBackgroundGUI/OnForegroundGUI are default interface methods and need no implementation.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.StripDll(System.String)">
+            <summary>Bare name, for matching against <see cref="F:StArray.ModManager.AssemblyEmitter.SkipAssemblies"/>.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.WithDll(System.String)">
+            <summary>
+            Name as the runtime wants it. Both backends resolve assemblies through
+            <c>OpenAssembly</c>, which expects the file name including the ".dll" suffix
+            (see how hand-written stubs pass "Assembly-CSharp.dll").
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.GetNameChain(System.IntPtr,System.Int32)">
+            <summary>Outer-to-inner name segments, e.g. ["Outer", "Inner"].</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.GetRuntimeLookupName(System.IntPtr)">
+            <summary>Name used for runtime lookup — nesting joined with '+' (both backends map '+' to '/').</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.GetRootNamespace(System.IntPtr)">
+            <summary>Namespace of the outermost declaring type — nested classes report an empty namespace.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.GetClassNamespaceAndName(System.IntPtr)">
+            <summary>Display name: namespace plus the dot-joined nesting chain.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.CollectInterfaceMethodKeys(System.IntPtr)">
+            <summary>All interface methods a concrete type must expose, keyed by "name|paramCount".</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.IsUnmanagedElement(System.Type)">
+            <summary>True when <paramref name="t"/> is valid as a RuntimeArray&lt;T&gt; type argument.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.NeedsUnboxedReturn(System.Type)">
+            <summary>
+            True for returns that come back boxed from runtime_invoke and must be unboxed.
+            nint/nuint are excluded: they stand for object pointers or types we could not
+            resolve, where the raw pointer is what the caller wants.
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.AssemblyEmitter.Scratch">
+            <summary>Lazily-declared scratch locals for bit-reinterpreting float/double against nint.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.Scratch.#ctor(System.Reflection.Emit.ILGenerator)">
+            <summary>Lazily-declared scratch locals for bit-reinterpreting float/double against nint.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.ReserveMethod(StArray.ModManager.AssemblyEmitter.TypeCtx,System.String,System.Type[])">
+            <summary>
+            Reserves a method name. Overloads that differ only in types erased to nint would
+            otherwise collide, so a numeric suffix is appended; the runtime lookup string
+            emitted into the body still uses the original name.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.IsInterfaceDeclarable(StArray.ModManager.AssemblyEmitter.MethodMeta)">
+            <summary>
+            Which interface members actually get declared on the interface TypeBuilder. The same
+            predicate gates the implementing side, so the two never disagree about what must exist.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.EmitMissingInterfaceMethods(System.Reflection.Emit.TypeBuilder,System.IntPtr,System.String,System.String,System.String,StArray.ModManager.AssemblyEmitter.TypeCtx)">
+            <summary>
+            Concrete types that declare an interface must expose every interface method, or the
+            stub assembly fails to load. Anything the type itself did not define is forwarded here.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.EmitLoadArgAsNInt(System.Reflection.Emit.ILGenerator,System.Int32,System.Type,StArray.ModManager.AssemblyEmitter.Scratch)">
+            <summary>Pushes argument <paramref name="index"/> onto the stack as a native int.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.EmitConvertFromNInt(System.Reflection.Emit.ILGenerator,System.Type,StArray.ModManager.AssemblyEmitter.Scratch)">
+            <summary>Converts the native int on the stack into <paramref name="type"/>.</summary>
+        </member>
+        <member name="T:StArray.ModManager.AssemblyEmitter.MethodMeta">
+            <summary>
+            <paramref name="returnType"/>/<paramref name="paramTypes"/> hold the resolved stub type
+            names; the <c>raw*</c> counterparts keep the runtime's own names (generic arguments
+            included) so members that degrade to nint can still be annotated with what they really are.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.MethodMeta.#ctor(System.String,System.String,System.String[],System.Boolean,System.IntPtr,System.IntPtr[],System.String,System.String[])">
+            <summary>
+            <paramref name="returnType"/>/<paramref name="paramTypes"/> hold the resolved stub type
+            names; the <c>raw*</c> counterparts keep the runtime's own names (generic arguments
+            included) so members that degrade to nint can still be annotated with what they really are.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.GetEnumUnderlying(System.IntPtr)">
+            <summary>
+            The enum's storage type, taken from its <c>value__</c> instance field — available on both
+            backends, unlike <c>enum_basetype</c>.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.ReadEnumMembers(System.IntPtr,System.Type)">
+            <summary>
+            Reads every literal member. Returns null if any value could not be read — a partially
+            populated enum would silently report wrong values, so the type stays a plain class instead.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.TryDefineEnum(System.IntPtr,System.Reflection.Emit.TypeBuilder,System.String,System.String)">
+            <summary>Defines a real managed enum. Returns null when the metadata was not usable.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.StackTypeOf(System.Type)">
+            <summary>Enums are laid out as their storage type on the stack, so IL treats them as such.</summary>
+        </member>
+        <member name="M:StArray.ModManager.AssemblyEmitter.SanitizeMemberName(System.String)">
+            <summary>
+            Member name. Explicit interface implementations are named with the full interface path at
+            runtime (<c>System.Collections.IEnumerable.GetEnumerator</c>). Such a name is legal IL, but
+            C# has no syntax to call it — the member would exist and be unreachable. Keep only the last
+            segment; <see cref="M:StArray.ModManager.AssemblyEmitter.ReserveMethod(StArray.ModManager.AssemblyEmitter.TypeCtx,System.String,System.Type[])"/> / <see cref="M:StArray.ModManager.AssemblyEmitter.ReserveMember(StArray.ModManager.AssemblyEmitter.TypeCtx,System.String)"/> handle any collision.
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Behaviours.BehaviourManager">
+             <summary>
+             管理所有 <see cref="T:StArray.ModManager.Behaviours.GameBehaviour"/> 的生命周期。
+             静态方法，无需实例化。
+            
+             用户回调一律在锁外执行 —— 它们可能反过来调用 <see cref="M:StArray.ModManager.Behaviours.BehaviourManager.Add``1(``0)"/> / <see cref="M:StArray.ModManager.Behaviours.BehaviourManager.Remove(StArray.ModManager.Behaviours.GameBehaviour)"/>。
+             异常按 Unity 的做法处理：隔离到单个行为、记录、继续，不自动禁用。
+             </summary>
+        </member>
+        <member name="P:StArray.ModManager.Behaviours.BehaviourManager.Behaviours">
+            <summary>当前活跃的行为列表（只读快照）</summary>
+        </member>
+        <member name="P:StArray.ModManager.Behaviours.BehaviourManager.Count">
+            <summary>活跃行为数量</summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.Add``1(``0)">
+            <summary>
+            添加一个行为实例。下一帧调用 OnAwake / OnEnable，随后是 OnStart。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.Remove(StArray.ModManager.Behaviours.GameBehaviour)">
+            <summary>
+            移除并销毁一个行为实例。下一帧调用 OnDisable / OnStop。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.RemoveAll``1">
+            <summary>
+            移除并销毁指定类型的所有行为。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.RemoveAll">
+            <summary>
+            移除并销毁所有行为。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.Get``1">
+            <summary>
+            获取第一个指定类型的行为，若不存在返回 null。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.GetAll``1">
+            <summary>
+            获取所有指定类型的行为。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.LogFault(StArray.ModManager.Behaviours.GameBehaviour,System.String,System.Exception)">
+            <summary>
+            记录回调异常。与 Unity 一致：不禁用该行为，下一帧照旧调用，
+            因此一个坏掉的行为会持续报错 —— 这是有意的，止损由使用者决定。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.ProcessPending">
+            <summary>处理增删队列，派发 OnAwake/OnEnable 与 OnDisable/OnStop，在 Update 之前调用。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.Update(System.Single)">
+            <summary>按 Unity 的阶段顺序派发 OnStart → OnUpdate → OnLateUpdate。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.BehaviourManager.GUI(ImGuiNET.ImDrawListPtr)">
+            <summary>对所有行为调用 OnGUI（ImGui 窗口渲染之后）。</summary>
+        </member>
+        <member name="T:StArray.ModManager.Behaviours.GameBehaviour">
+             <summary>
+             仿 MonoBehaviour 的基类 —— 由 <see cref="T:StArray.ModManager.Behaviours.BehaviourManager"/> 驱动生命周期，
+             时机来自渲染帧（每个 Unity 逻辑帧末尾一次）。
+            
+             生命周期顺序与 Unity 对齐：
+             OnAwake → OnEnable → OnStart → (OnUpdate → OnLateUpdate → OnGUI)* → OnDisable → OnStop。
+             每个阶段都会先对所有行为跑完，再进入下一阶段。
+            
+             回调抛出的异常按 Unity 的做法处理：记录后继续，<b>不会</b>自动禁用该行为，
+             所以每帧都会照旧调用（也就照旧报错）。要止损请显式设置
+             <see cref="P:StArray.ModManager.Behaviours.GameBehaviour.Enabled"/> = false 或调用 <see cref="M:StArray.ModManager.Behaviours.BehaviourManager.Remove(StArray.ModManager.Behaviours.GameBehaviour)"/>。
+             </summary>
+        </member>
+        <member name="P:StArray.ModManager.Behaviours.GameBehaviour.Awoken">
+            <summary>是否已调用过 OnAwake</summary>
+        </member>
+        <member name="P:StArray.ModManager.Behaviours.GameBehaviour.Started">
+            <summary>是否已调用过 OnStart</summary>
+        </member>
+        <member name="P:StArray.ModManager.Behaviours.GameBehaviour.IsDestroyed">
+            <summary>是否已标记为销毁</summary>
+        </member>
+        <member name="P:StArray.ModManager.Behaviours.GameBehaviour.Enabled">
+            <summary>
+            对应 Unity 的 <c>enabled</c>。为 false 时不再收到
+            OnStart / OnUpdate / OnLateUpdate / OnGUI，但仍会收到 OnStop。
+            切换会立即触发 OnEnable / OnDisable（与 Unity 一致）；
+            在 OnAwake 之前设置不触发，OnEnable 会在 OnAwake 之后统一派发。
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Behaviours.GameBehaviour.EnabledRaw">
+            <summary>不触发副作用地读取启用状态，供调度器使用。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.GameBehaviour.OnAwake">
+            <summary>加入调度后立即调用一次（类似 Unity Awake）。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.GameBehaviour.OnEnable">
+            <summary>每次被启用时调用（类似 Unity OnEnable）。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.GameBehaviour.OnStart">
+            <summary>首次启用后、第一次 OnUpdate 之前调用一次（类似 Unity Start）。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.GameBehaviour.OnUpdate(System.Single)">
+            <summary>每帧调用（类似 Unity Update），在所有 ImGui 窗口绘制之前。</summary>
+            <param name="delta">上一帧到当前帧的时间间隔（秒）</param>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.GameBehaviour.OnLateUpdate(System.Single)">
+            <summary>每帧在所有行为的 OnUpdate 之后调用（类似 Unity LateUpdate）。</summary>
+            <param name="delta">上一帧到当前帧的时间间隔（秒）</param>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.GameBehaviour.OnGUI(ImGuiNET.ImDrawListPtr)">
+            <summary>
+            每帧在 ImGui 主窗口渲染完毕后调用（类似 Unity OnGUI），可在此绘制额外 ImGui 控件。
+            </summary>
+            <param name="drawList">ImGui 背景绘制列表</param>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.GameBehaviour.OnDisable">
+            <summary>每次被禁用时调用，销毁前也会调用一次（类似 Unity OnDisable）。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Behaviours.GameBehaviour.OnStop">
+            <summary>行为被销毁时调用一次（类似 Unity OnDestroy）。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Il2Cpp.Il2CppFunctions.SetIl2CppLibraryPath(System.String)">
+            <summary>
+            指定 il2cpp 宿主库路径。可安全地重复调用：
+            <see cref="M:System.Runtime.InteropServices.NativeLibrary.SetDllImportResolver(System.Reflection.Assembly,System.Runtime.InteropServices.DllImportResolver)"/> 对同一程序集只允许注册一次
+            （再次注册会抛 <see cref="T:System.InvalidOperationException"/>），因此这里只注册一次，
+            由解析器读取最新路径。传入新路径会让下次解析重新加载。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Il2Cpp.Il2CppAssembly">
+            <summary>反射 API：Assembly → Class → Method/Field</summary>
+        </member>
+        <member name="M:StArray.ModManager.Il2Cpp.Il2CppClass.GetGeneric(System.String,System.String[])">
+            <summary>实例化泛型类。例如 GetGeneric("System.Collections.Generic.List`1", "System.Int32")</summary>
+        </member>
+        <member name="T:StArray.ModManager.Il2Cpp.ClassFactory">
+            自定义类工厂 Native il2cpp_class_new
+        </member>
+        <member name="M:StArray.ModManager.Il2Cpp.ClassFactory.CreateMonoBehaviour(System.String,System.String,System.String)">
+            创建自定义 MonoBehaviour 子类
+        </member>
+        <member name="T:StArray.ModManager.Inspector.Hotkey">
+            <summary>
+            可配置的快捷键：一个主键加若干修饰键。
+            检查器会渲染成一个「点击后按键捕获」的按钮，可直接作为设置字段持久化。
+            </summary>
+        </member>
+        <member name="F:StArray.ModManager.Inspector.Hotkey.Key">
+            <summary>主键；<see cref="F:ImGuiNET.ImGuiKey.None"/> 表示未绑定</summary>
+        </member>
+        <member name="F:StArray.ModManager.Inspector.Hotkey.Ctrl">
+            <summary>需要按住 Ctrl</summary>
+        </member>
+        <member name="F:StArray.ModManager.Inspector.Hotkey.Shift">
+            <summary>需要按住 Shift</summary>
+        </member>
+        <member name="F:StArray.ModManager.Inspector.Hotkey.Alt">
+            <summary>需要按住 Alt</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.#ctor(ImGuiNET.ImGuiKey,System.Boolean,System.Boolean,System.Boolean)">
+            <summary>指定主键与修饰键</summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.Hotkey.IsBound">
+            <summary>是否已绑定按键</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.IsPressed">
+            <summary>本帧是否刚被按下（含修饰键判定）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.IsDown">
+            <summary>是否处于按住状态（含修饰键判定）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.ToString">
+            <summary>形如 "Ctrl+Shift+F5" 的可读文本</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.CapturableKeys">
+            <summary>修饰键之外的实体按键范围（跳过鼠标、手柄与修饰键本身）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.Equals(StArray.ModManager.Inspector.Hotkey)">
+            <inheritdoc/>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.Equals(System.Object)">
+            <inheritdoc/>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.GetHashCode">
+            <inheritdoc/>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.op_Equality(StArray.ModManager.Inspector.Hotkey,StArray.ModManager.Inspector.Hotkey)">
+            <summary>相等比较</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.Hotkey.op_Inequality(StArray.ModManager.Inspector.Hotkey,StArray.ModManager.Inspector.Hotkey)">
+            <summary>不等比较</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModInspector">
+             <summary>
+             自动检查器 / Auto inspector — reflection-based ImGui controls (Unity Inspector style)。
+            
+             成员需要<b>显式标记</b>才会出现：带任意 <see cref="T:StArray.ModManager.Inspector.ModSettingAttributeBase"/> 派生特性
+             （<see cref="T:StArray.ModManager.Inspector.ModSettingAttribute"/>、<see cref="T:StArray.ModManager.Inspector.ModSettingLabelAttribute"/> 等）即可，
+             与访问修饰符无关 —— private 字段同样可以是设置项。
+             </summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.IsMarked(System.Reflection.MemberInfo,System.Attribute[]@)">
+            <summary>
+            是否被纳入检查器。语义是「显式标记才收」：带任意 <see cref="T:StArray.ModManager.Inspector.ModSettingAttributeBase"/>
+            派生特性即算标记，<see cref="T:StArray.ModManager.Inspector.ModSettingIgnoreAttribute"/> 一票否决。
+            访问修饰符不参与判断 —— private 字段照样可以是设置项。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModInspector.SettingMember">
+            <summary>被检查器纳入的成员：名称 + 类型 + 读写器。供设置持久化复用。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.SettingMember.#ctor(System.String,System.Type,System.Func{System.Object,System.Object},System.Action{System.Object,System.Object})">
+            <summary>被检查器纳入的成员：名称 + 类型 + 读写器。供设置持久化复用。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.GetSettingMembers(System.Type)">
+            <summary>
+            获取参与持久化的成员。与检查器面板使用同一份元数据，
+            因此在面板里能改的（含属性、静态成员、private 字段）都能被保存。
+            标记 <see cref="T:StArray.ModManager.Inspector.ModSettingNoSaveAttribute"/> 或只读的成员不在其中。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Draw(System.Object)">
+            <summary>为目标对象自动绘制检查器 / Draw inspector for target object</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.IsShowIfSatisfied(StArray.ModManager.Inspector.ModInspector.Entry[],System.Object,StArray.ModManager.Inspector.ModInspector.Entry)">
+            <summary>依赖成员为 false（或取反后为 false）时，本项变灰。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.RegisterDrawer``1(System.Action{``0})">
+            <summary>注册自定义类型绘制器 / Register custom type drawer</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Bool(System.String,System.Boolean@)">
+            <summary>Checkbox / bool checkbox</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Int(System.String,System.Int32@)">
+            <summary>DragInt / int drag</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.SliderInt(System.String,System.Int32@,System.Int32,System.Int32)">
+            <summary>SliderInt / int slider</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Long(System.String,System.Int64@)">
+            <summary>Drag (long) / long drag，全 64 位精度</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Float(System.String,System.Single@)">
+            <summary>DragFloat / float drag</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.SliderFloat(System.String,System.Single@,System.Single,System.Single)">
+            <summary>SliderFloat / float slider</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Double(System.String,System.Double@)">
+            <summary>Drag (double) / double drag，不降精度到 float</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Text(System.String,System.String@,System.UInt32)">
+            <summary>InputText / string input</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Enum``1(System.String,``0@)">
+            <summary>Combo 枚举 / enum combo</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Vec2(System.String,System.Numerics.Vector2@)">
+            <summary>DragFloat2 / Vector2 drag</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Vec3(System.String,System.Numerics.Vector3@)">
+            <summary>DragFloat3 / Vector3 drag</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Vec4(System.String,System.Numerics.Vector4@)">
+            <summary>DragFloat4 / Vector4 drag</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Vec2(System.String,System.Numerics.Vector2@,System.Single,System.Single)">
+            <summary>SliderFloat2 / Vector2 slider</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Vec3(System.String,System.Numerics.Vector3@,System.Single,System.Single)">
+            <summary>SliderFloat3 / Vector3 slider</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Vec4(System.String,System.Numerics.Vector4@,System.Single,System.Single)">
+            <summary>SliderFloat4 / Vector4 slider</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Framed(StArray.ModManager.Inspector.ModInspector.Entry,System.Func{System.Boolean})">
+            <summary>包一层 Pre/Post，返回控件是否被修改。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.TryDrawIntegral(StArray.ModManager.Inspector.ModInspector.Entry,System.Type,System.Object,System.Object@,System.Boolean@)">
+            <summary>
+            覆盖全部整数宽度与符号。之前只有 int/long 有分支，其余（byte/short/uint/…）
+            因为 IsPrimitive 为 true 绕过了所有兜底，最终落到只读文本。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.ScalarField``1(StArray.ModManager.Inspector.ModInspector.Entry,ImGuiNET.ImGuiDataType,``0@)">
+            <summary>
+            标量控件 + Pre/Post 包装。不能复用 <see cref="M:StArray.ModManager.Inspector.ModInspector.Framed(StArray.ModManager.Inspector.ModInspector.Entry,System.Func{System.Boolean})"/>：C# 不允许在 lambda 内取局部变量地址。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.Scalar(System.String,ImGuiNET.ImGuiDataType,System.Void*,StArray.ModManager.Inspector.ModInspector.Entry)">
+            <summary>有范围时用 Slider，否则用 Drag；两者都按目标类型的原生位宽操作。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.DrawVec``1(System.String,StArray.ModManager.Inspector.ModInspector.Entry,``0@,System.Int32)">
+            <summary>
+            Vec 绘制。带多分量范围时拆成逐分量滑块 —— ImGui 的 SliderFloatN 只接受统一范围，
+            之前的实现只用了第一个分量的上下限，其余被静默丢弃。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModInspector.TryDrawList(StArray.ModManager.Inspector.ModInspector.Entry,System.Collections.IList,System.Object@)">
+            <summary>
+            List&lt;T&gt; / T[] 的结构化编辑：每项一行，带删除与追加。
+            仅在元素类型能用现有控件绘制时接管，否则交回 JSON 编辑器。
+            </summary>
+        </member>
+        <member name="F:StArray.ModManager.Inspector.ModInspector.SettingsJson">
+            <summary>
+            Mod 设置用的序列化选项。走反射而非源生成上下文：设置字段的类型由各 mod 自由决定，
+            源生成无法预先覆盖（当前上下文只有 bool/float/string 等少数类型，遇到 int、
+            Vector3、枚举会直接抛 "Metadata for type ... was not provided"）。
+            本项目全程依赖 JIT（Reflection.Emit / Expression / Assembly.LoadFrom），不受 AOT 约束。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModInspector.LabelSide">
+            <summary>标签相对于控件的摆放位置</summary>
+        </member>
+        <member name="F:StArray.ModManager.Inspector.ModInspector.LabelSide.Top">
+            <summary>标签在上方</summary>
+        </member>
+        <member name="F:StArray.ModManager.Inspector.ModInspector.LabelSide.Left">
+            <summary>标签在左侧</summary>
+        </member>
+        <member name="F:StArray.ModManager.Inspector.ModInspector.LabelSide.Right">
+            <summary>标签在右侧</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingAttributeBase">
+            <summary>
+            所有检查器特性的基类。带有任意一个此类特性的成员即视为「被标记」，
+            会出现在检查器面板中，并参与设置的保存 / 读取 —— 无论其访问修饰符
+            （private / protected / internal 字段与属性同样有效）。
+            未标记的成员一律忽略。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingAttribute">
+            <summary>
+            显式把成员纳入检查器与设置持久化。
+            只需要默认外观时用它即可；要改标签用 <see cref="T:StArray.ModManager.Inspector.ModSettingLabelAttribute"/>。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingIgnoreAttribute">
+            <summary>
+            标记字段不在自动检查器面板中显示（类似 Unity 的 HideInInspector）。
+            优先级最高：即使带有其它标记也会被排除，且不参与持久化。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingLabelAttribute">
+            <summary>
+            标记字段以指定显示名称
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingLabelAttribute.Label">
+            <summary>显示名称</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingLabelAttribute.#ctor(System.String)">
+            <summary>指定字段显示名称</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingRangeAttribute">
+            <summary>
+            标记 int/float/Vec 字段以指定范围。Vec2 传 4 个值 (xMin,xMax, yMin,yMax)，Vec3 传 6 个，Vec4 传 8 个。
+            多分量模式下每个分量会各自渲染成一条滑块。
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingRangeAttribute.Min">
+            <summary>范围最小值</summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingRangeAttribute.Max">
+            <summary>范围最大值</summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingRangeAttribute.Mins">
+            <summary>最小值数组（Vec 多分量模式）</summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingRangeAttribute.Maxs">
+            <summary>最大值数组（Vec 多分量模式）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingRangeAttribute.#ctor(System.Single,System.Single)">
+            <summary>单值范围 (int/float)</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingRangeAttribute.#ctor(System.Single,System.Single,System.Single,System.Single)">
+            <summary>Vec2 范围 (xMin, xMax, yMin, yMax)</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingRangeAttribute.#ctor(System.Single,System.Single,System.Single,System.Single,System.Single,System.Single)">
+            <summary>Vec3 范围 (xMin, xMax, yMin, yMax, zMin, zMax)</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingRangeAttribute.#ctor(System.Single,System.Single,System.Single,System.Single,System.Single,System.Single,System.Single,System.Single)">
+            <summary>Vec4 范围 (xMin, xMax, yMin, yMax, zMin, zMax, wMin, wMax)</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingLabelSideAttribute">
+            <summary>
+            标记字段标签位置
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingLabelSideAttribute.Side">
+            <summary>标签位置</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingLabelSideAttribute.#ctor(StArray.ModManager.Inspector.ModInspector.LabelSide)">
+            <summary>指定字段标签位置</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingJsonAttribute">
+            <summary>
+            标记 string 字段为 JSON 内容，检查器使用多行编辑器
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingJsonAttribute.Lines">
+            <summary>编辑器行数</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingTooltipAttribute">
+            <summary>
+            鼠标悬停时显示的说明文字。
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingTooltipAttribute.Text">
+            <summary>说明文字</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingTooltipAttribute.#ctor(System.String)">
+            <summary>指定悬停说明</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingHeaderAttribute">
+            <summary>
+            在此成员之前插入一个可折叠分组标题。后续成员归入该分组，直到下一个标题。
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingHeaderAttribute.Title">
+            <summary>分组标题</summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingHeaderAttribute.DefaultOpen">
+            <summary>分组默认是否展开</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingHeaderAttribute.#ctor(System.String)">
+            <summary>指定分组标题</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingShowIfAttribute">
+            <summary>
+            依赖另一个 bool 成员：为 false 时本项变灰不可编辑（而非隐藏，避免布局跳动）。
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingShowIfAttribute.Member">
+            <summary>被依赖成员的名称，建议用 nameof</summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingShowIfAttribute.Invert">
+            <summary>取反：被依赖成员为 true 时才禁用</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingShowIfAttribute.#ctor(System.String)">
+            <summary>指定依赖成员</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingColorAttribute">
+            <summary>
+            把 Vector4 / uint 当作颜色编辑。
+            Vector4 按 RGBA 各分量 0~1；uint 按 ImGui 的 packed ABGR（与 draw list 一致）。
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingColorAttribute.Alpha">
+            <summary>是否包含 Alpha 通道</summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingColorAttribute.Picker">
+            <summary>使用色轮选择器而非行内色块</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingReadOnlyAttribute">
+            <summary>
+            只读展示：绘制但不可编辑，适合展示运行时状态。仍会参与持久化。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingOrderAttribute">
+            <summary>
+            指定排序权重，小的在前。未标记者视为 0，同权重按声明顺序。
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Inspector.ModSettingOrderAttribute.Order">
+            <summary>排序权重</summary>
+        </member>
+        <member name="M:StArray.ModManager.Inspector.ModSettingOrderAttribute.#ctor(System.Int32)">
+            <summary>指定排序权重</summary>
+        </member>
+        <member name="T:StArray.ModManager.Inspector.ModSettingNoSaveAttribute">
+            <summary>
+            排除出持久化：显示在检查器里，但不写入 settings.json。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Manager.Benchmark">
+            <summary>
+            轻量计时，支持嵌套 — Begin 启动，End 返回耗时秒数
+            <code>
+            Benchmark.Begin();
+            // ... work ...
+            var elapsed = Benchmark.End();
+            Logger.Info("Foo", $"done in {elapsed:F3}s");
+            </code>
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.Benchmark.Begin">
+            <summary>启动计时（支持嵌套）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.Benchmark.End">
+            <summary>结束最近一次计时，返回耗时秒数</summary>
+        </member>
+        <member name="T:StArray.ModManager.Manager.Logger">
+            <summary>
+            统一日志系统 —— 纯事件广播，不依赖任何平台。由 Managed 入口订阅以桥接 Android logcat。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Manager.Logger.Level">
+            <summary>日志级别</summary>
+        </member>
+        <member name="E:StArray.ModManager.Manager.Logger.OnLog">
+            <summary>日志广播事件（Level, Tag, Message）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.Logger.Debug(System.String,System.String,System.String,System.Int32)">
+            <summary>调试日志，msg 为空时输出调用位置</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.Logger.Info(System.String,System.String,System.String,System.Int32)">
+            <summary>信息日志，msg 为空时输出调用位置</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.Logger.Warn(System.String,System.String,System.String,System.Int32)">
+            <summary>警告日志，msg 为空时输出调用位置</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.Logger.Error(System.String,System.String,System.String,System.Int32)">
+            <summary>错误日志，msg 为空时输出调用位置</summary>
+        </member>
+        <member name="T:StArray.ModManager.Manager.ModEntry">
+            <summary>
+            Mod 条目数据模型
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.Id">
+            <summary>唯一标识</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.Name">
+            <summary>Mod 名称</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.Version">
+            <summary>版本号</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.Author">
+            <summary>作者</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.Description">
+            <summary>描述</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.FolderPath">
+            <summary>Mod 所在文件夹路径</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.EntryPoint">
+            <summary>入口 DLL 或可执行文件路径</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.IsEnabled">
+            <summary>是否已启用</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.Dependencies">
+            <summary>依赖的其他 Mod ID 列表</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.LoadState">
+            <summary>加载状态</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.LoadError">
+            <summary>加载时的错误信息</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModEntry.PluginInstance">
+            <summary>已加载的插件实例（供 UI 调用 OnGui）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModEntry.ToString">
+            <summary>格式化显示：Name vVersion</summary>
+        </member>
+        <member name="T:StArray.ModManager.Manager.ModLoadState">
+            <summary>
+            Mod 加载状态
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Manager.ModManagerConfig">
+            <summary>
+            Mod 管理器全局配置 —— UI 设置 + 各 Mod 启用状态
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerConfig.ModsDirectory">
+            <summary>Mods 目录路径</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerConfig.UiScale">
+            <summary>界面缩放 (FontGlobalScale)</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerConfig.GrabMinSize">
+            <summary>滑动条抓取宽度</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerConfig.ScrollbarSize">
+            <summary>滚动条宽度</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerConfig.ModEnabled">
+            <summary>Mod ID → 是否启用</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerConfig.Save(System.String)">
+            <summary>保存到指定目录（源生成器）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerConfig.Load(System.String)">
+            <summary>从指定目录加载（源生成器），失败返回默认</summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.Boolean">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.Single">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.ModManagerConfig">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.DictionaryStringBoolean">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.DictionaryStringJsonElement">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.DictionaryStringObject">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.JsonElement">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.Object">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.String">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.Default">
+            <summary>
+            The default <see cref="T:System.Text.Json.Serialization.JsonSerializerContext"/> associated with a default <see cref="T:System.Text.Json.JsonSerializerOptions"/> instance.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Manager.ModManagerJsonContext.GeneratedSerializerOptions">
+            <summary>
+            The source-generated options associated with this context.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerJsonContext.#ctor">
+            <inheritdoc/>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerJsonContext.#ctor(System.Text.Json.JsonSerializerOptions)">
+            <inheritdoc/>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerJsonContext.GetTypeInfo(System.Type)">
+            <inheritdoc/>
+        </member>
+        <member name="T:StArray.ModManager.Manager.ModManagerUI">
+            <summary>Mod 管理器 UI / Mod manager main UI — all ImGui interface logic</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerUI.#ctor(StArray.ModManager.Runtime.ModLoader,System.String)">
+            <summary>初始化 UI，加载配置并扫描 Mod</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerUI.GenerateUnmanagedTypeAssembly">
+            <summary>
+            生成"未托管类型程序集"到 Mods 目录，随后重新扫描以便它立刻出现在列表中。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerUI.SaveConfig">
+            <summary>保存管理器全局配置</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerUI.AutoEnableMods">
+            <summary>根据配置自动启用之前已开启的 Mod</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerUI.Render">
+            <summary>
+            渲染所有 UI（由外部每帧调用）
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerUI.SaveSettings(StArray.ModManager.Manager.ModEntry,StArray.ModManager.Runtime.IModSettings)">
+            <summary>序列化检查器展示的字段到 {mod.FolderPath}/settings.json（忽略 IModPlugin 属性）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Manager.ModManagerUI.LoadSettings(StArray.ModManager.Manager.ModEntry,StArray.ModManager.Runtime.IModSettings)">
+            <summary>从 {mod.FolderPath}/settings.json 反序列化检查器字段到设置对象</summary>
+        </member>
+        <member name="E:StArray.ModManager.Mono.MonoDomain.AssemblyLoad">
+            <summary>Assembly loaded callback. Args: assembly name (e.g. "Assembly-CSharp.dll"), assembly ptr.</summary>
+        </member>
+        <member name="T:StArray.ModManager.Mono.MonoFunctions">
+            <summary>
+            Mono Runtime P/Invoke 封装 —— 将 Methods 类的 unsafe 指针 API
+            包装为与 Il2CppFunctions 一致的 nint/IntPtr 风格。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Mono.MonoAssembly">
+            <summary>反射 API：Assembly → Class → Method/Field</summary>
+        </member>
+        <member name="M:StArray.ModManager.Mono.MonoClass.GetMethod(System.String,System.String[])">
+            <summary>通过参数类型名称查找方法（慢路径：枚举所有方法匹配）</summary>
+        </member>
+        <member name="P:StArray.ModManager.Mono.MonoMethod.FunctionPtr">
+            <summary>编译方法并返回指向原生代码的函数指针</summary>
+        </member>
+        <member name="P:StArray.ModManager.Mono.MonoMethod.Signature">
+            <summary>获取方法签名</summary>
+        </member>
+        <member name="P:StArray.ModManager.Mono.MonoMethod.ParamCount">
+            <summary>参数个数</summary>
+        </member>
+        <member name="P:StArray.ModManager.Mono.MonoMethod.ReturnType">
+            <summary>返回类型</summary>
+        </member>
+        <member name="P:StArray.ModManager.Mono.MonoMethod.ReturnTypeName">
+            <summary>返回类型名称（如 "System.Int32"）</summary>
+        </member>
+        <member name="P:StArray.ModManager.Mono.MonoMethod.IsStatic">
+            <summary>判断是否为静态方法</summary>
+        </member>
+        <member name="M:StArray.ModManager.Mono.MonoMethod.Invoke(System.IntPtr,System.IntPtr[])">
+            <summary>调用方法。obj=0 表示静态调用。args 传递 nint 指针数组。</summary>
+        </member>
+        <member name="M:StArray.ModManager.Mono.MonoMethod.InvokeStatic(System.IntPtr[])">
+            <summary>静态调用</summary>
+        </member>
+        <member name="M:StArray.ModManager.Mono.MonoMethod.InvokeUnbox``1(System.IntPtr,System.IntPtr[])">
+            <summary>调用并拆箱返回值（适用于返回值为值类型的方法）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Mono.MonoMethod.InvokeStaticUnbox``1(System.IntPtr[])">
+            <summary>静态调用并拆箱</summary>
+        </member>
+        <member name="M:StArray.ModManager.Mono.MonoMethod.InvokeConstructor(System.IntPtr)">
+            <summary>调用构造函数（调用前必须已分配对象）</summary>
+        </member>
+        <member name="T:StArray.ModManager.Resources.L10n">
+            <summary>基于 resx 的轻量本地化</summary>
+        </member>
+        <member name="M:StArray.ModManager.Resources.L10n.Get(System.String,System.Object[])">
+            <summary>获取本地化字符串，支持 {0} 占位</summary>
+        </member>
+        <member name="T:StArray.ModManager.Resources.Localization">
+            <summary>
+              A strongly-typed resource class, for looking up localized strings, etc.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Resources.Localization.ResourceManager">
+            <summary>
+              Returns the cached ResourceManager instance used by this class.
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Resources.Localization.Culture">
+            <summary>
+              Overrides the current thread's CurrentUICulture property for all
+              resource lookups using this strongly typed resource class.
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Hooks.UnmanagedHookAttribute">
+            <summary>
+            标记一个方法为托管运行时（Mono / Il2Cpp）函数 Hook。
+            3 参数构造函数 Namespace 默认为 ""（Il2Cpp 风格）；
+            4 参数构造函数可指定 Namespace（Mono 风格）。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Runtime.HookHelper">
+            <summary>
+            Hook 辅助类 —— 提供与平台无关的静态 Hook 操作入口，
+            供 <c>HookGenerator</c> 生成的代码调用。
+            平台初始化时需设置 <see cref="P:StArray.ModManager.Runtime.HookHelper.Instance"/>。
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Runtime.HookHelper.Instance">
+            <summary>当前平台的 Hook 实现（Windows = MinHook，Android = Dobby）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.HookHelper.Hook(System.IntPtr,System.IntPtr)">
+            <summary>安装 Hook</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.HookHelper.Unhook(System.IntPtr)">
+            <summary>卸载 Hook</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.HookHelper.GetFunction(System.String,System.String)">
+            <summary>获取库导出函数地址</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.HookHelper.GetFunctionRVA(System.String,System.Int64)">
+            <summary>获取库基址 + RVA 对应的绝对地址</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.HookHelper.GetFunctionFallback(System.String,System.String)">
+            <summary>降级路径（无 Instance 时使用）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.HookHelper.GetFunctionRVAFallback(System.String,System.Int64)">
+            <summary>降级 RVA 解析路径</summary>
+        </member>
+        <member name="T:StArray.ModManager.Runtime.IHook">
+            <summary>
+            原生方法 Hook 抽象 —— 支持安装/卸载 inline hook 及获取库导出函数
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IHook.Hook(System.IntPtr,System.IntPtr)">
+            <summary>安装 hook，将 target 重定向到 detour，返回原始函数指针</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IHook.Unhook(System.IntPtr)">
+            <summary>卸载 target 上的 hook</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IHook.GetFunction(System.String,System.String)">
+            <summary>从指定库获取导出函数地址</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IHook.GetFunctionRVA(System.String,System.Int64)">
+            <summary>从指定库计算 RVA（相对虚拟地址）对应的绝对地址</summary>
+        </member>
+        <member name="T:StArray.ModManager.Runtime.IModPlugin">
+            <summary>
+            Mod 插件接口 —— Mod DLL 实现此接口，元数据由属性声明
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.Runtime.IModPlugin.Id">
+            <summary>唯一标识</summary>
+        </member>
+        <member name="P:StArray.ModManager.Runtime.IModPlugin.Name">
+            <summary>显示名称</summary>
+        </member>
+        <member name="P:StArray.ModManager.Runtime.IModPlugin.Version">
+            <summary>版本号</summary>
+        </member>
+        <member name="P:StArray.ModManager.Runtime.IModPlugin.Author">
+            <summary>作者</summary>
+        </member>
+        <member name="P:StArray.ModManager.Runtime.IModPlugin.Description">
+            <summary>描述</summary>
+        </member>
+        <member name="P:StArray.ModManager.Runtime.IModPlugin.Dependencies">
+            <summary>依赖的其他 Mod ID</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IModPlugin.OnLoad">
+            <summary>Mod 加载时调用</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IModPlugin.OnUnload">
+            <summary>Mod 卸载时调用</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IModPlugin.OnBackgroundGUI(ImGuiNET.ImDrawListPtr)">
+            <summary>背景层绘制（ImGui 窗口下方、游戏画面之上），可用于水印等</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IModPlugin.OnForegroundGUI(ImGuiNET.ImDrawListPtr)">
+            <summary>前景层绘制（ImGui 窗口上方），可用于 FPS 等全局 HUD</summary>
+        </member>
+        <member name="T:StArray.ModManager.Runtime.ModEntryPointAttribute">
+            <summary>
+            程序集级标注，直接指出本程序集里的 <see cref="T:StArray.ModManager.Runtime.IModPlugin"/> 实现类型。
+            加载器读到它就无需 <c>GetTypes()</c> 全量扫描 —— 对生成的存根程序集尤其重要：
+            类型数以万计，且任何一个类型加载失败都会让整次扫描抛异常。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModEntryPointAttribute.#ctor(System.Type)">
+            <summary>
+            程序集级标注，直接指出本程序集里的 <see cref="T:StArray.ModManager.Runtime.IModPlugin"/> 实现类型。
+            加载器读到它就无需 <c>GetTypes()</c> 全量扫描 —— 对生成的存根程序集尤其重要：
+            类型数以万计，且任何一个类型加载失败都会让整次扫描抛异常。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.Runtime.IModSettingCustomDraw">
+            <summary>
+            可选接口 —— 复杂类型实现此接口可自定义在检查器中的绘制
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IModSettingCustomDraw.DrawInspector">
+            <summary>在检查器中绘制自定义 UI</summary>
+        </member>
+        <member name="T:StArray.ModManager.Runtime.IModSettings">
+            <summary>
+            可选接口 —— Mod 实现此接口可提供自定义 ImGui 设置面板
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.IModSettings.OnGui">
+            <summary>绘制 Mod 专属设置面板</summary>
+        </member>
+        <member name="T:StArray.ModManager.Runtime.ModLoader">
+            <summary>Mod 管理器核心 / Mod loader — scan, load, enable/disable mods</summary>
+        </member>
+        <member name="P:StArray.ModManager.Runtime.ModLoader.Mods">
+            <summary>已发现的 Mod 列表（只读）</summary>
+        </member>
+        <member name="P:StArray.ModManager.Runtime.ModLoader.ModsDirectory">
+            <summary>Mods 目录路径</summary>
+        </member>
+        <member name="E:StArray.ModManager.Runtime.ModLoader.OnModStateChanged">
+            <summary>Mod 状态变更事件</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModLoader.#ctor(System.String)">
+            <summary>创建 ModLoader 并指定 Mods 目录</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModLoader.ScanMods">
+            <summary>
+            扫描 mods 目录，发现所有 Mod
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModLoader.ResolvePluginType(System.Reflection.Assembly)">
+            <summary>
+            找出程序集里的 <see cref="T:StArray.ModManager.Runtime.IModPlugin"/> 实现类型。
+            优先读 <see cref="T:StArray.ModManager.Runtime.ModEntryPointAttribute"/>：生成的存根程序集有成千上万个类型，
+            全量扫描既慢、又会因其中任何一个类型加载失败而整体抛出。
+            没有该标注时回退到扫描，并容忍部分类型加载失败。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModLoader.DiscoverMod(System.String)">
+            <summary>
+            从文件夹发现 Mod 信息
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModLoader.LoadMod(StArray.ModManager.Manager.ModEntry)">
+            <summary>
+            加载指定的 Mod
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModLoader.UnloadMod(StArray.ModManager.Manager.ModEntry)">
+            <summary>
+            卸载指定的 Mod
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModLoader.ToggleMod(StArray.ModManager.Manager.ModEntry)">
+            <summary>
+            切换 Mod 启用状态
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModLoader.AddMod(StArray.ModManager.Manager.ModEntry)">
+            <summary>
+            添加一个新的 Mod 条目（手动创建）
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.ModLoader.RemoveMod(StArray.ModManager.Manager.ModEntry)">
+            <summary>
+            移除 Mod 条目
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.NativeFuncResolver.FindRva(System.String,System.Nullable{System.Byte}[])">
+            <summary>查找函数 RVA：优先符号名，失败则回退特征码</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.NativeFuncResolver.Resolve(System.String,System.Nullable{System.Byte}[])">
+            <summary>加载 + 定位 + 返回函数指针，一步到位</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.NativeFuncResolver.FindSymbolRva(System.String)">
+            <summary>在 .dynsym 中搜索符号名，返回 RVA（-1 表示未找到）</summary>
+        </member>
+        <member name="M:StArray.ModManager.Runtime.NativeFuncResolver.FindSymbolsByPattern(System.String)">
+            <summary>按模式匹配符号名（支持 * 通配符）</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.GraphicsDevice">
+            <summary>
+            统一后端图形设备检测 — 通过反射调用 UnityEngine.SystemInfo.get_graphicsDeviceType。
+            Unity 2020+ GraphicsDeviceType 枚举值：
+              0 = Direct3D9, 2 = Direct3D11, 3 = Direct3D12,
+              11 = OpenGLCore, 13 = Vulkan
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.GraphicsDevice.GetGraphicsDeviceType">
+            <summary>获取图形设备类型。失败返回 -1。</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.IAppDomain">
+            <summary>统一运行时 AppDomain 抽象</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.IRuntimeAssembly">
+            <summary>统一运行时程序集抽象</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.IRuntimeClass">
+            <summary>统一运行时类抽象</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.IRuntimeField">
+            <summary>统一运行时字段抽象</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.IRuntimeMethod">
+            <summary>统一运行时方法抽象</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.UnmanagedObject">
+            <summary>
+            原生托管对象基类 —— 强制子类实现 <c>nint Ptr</c> 属性并通过构造函数传入指针。
+            <see cref="M:StArray.ModManager.RuntimeAbstractions.RuntimeObject`1.GetInstance"/> 通过本基类构造函数创建类型化实例。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.RuntimeArray">
+            <summary>统一托管数组 — 元素按 nint 大小对齐（对象引用数组）</summary>
+        </member>
+        <member name="P:StArray.ModManager.RuntimeAbstractions.RuntimeArray.DataPtr">
+            <summary>获取元素原始指针（指向数组数据起始位置）</summary>
+        </member>
+        <member name="P:StArray.ModManager.RuntimeAbstractions.RuntimeArray.Item(System.Int32)">
+            <summary>按索引读取元素（nint = 对象引用或值类型数据指针）</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.RuntimeArray.GetObject(System.Int32)">
+            <summary>按索引获取元素为 RuntimeObject</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.RuntimeArray`1">
+            <summary>统一托管泛型数组 — 强类型元素访问</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.RuntimeHelpers.InstanceRetUnbox``1(System.IntPtr,System.String,System.Int32,System.IntPtr[])">
+            <summary>
+            For value-type returns. runtime_invoke hands back a *boxed* object, so the raw pointer
+            has to be unboxed and dereferenced — truncating it would yield garbage.
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.RuntimeHelpers.StaticRetUnbox``1(System.String,System.String,System.String,System.String,System.Int32,System.IntPtr[])">
+            <summary>Value-type counterpart of <see cref="M:StArray.ModManager.RuntimeAbstractions.RuntimeHelpers.StaticRet(System.String,System.String,System.String,System.String,System.Int32,System.IntPtr[])"/> — see <see cref="M:StArray.ModManager.RuntimeAbstractions.RuntimeHelpers.InstanceRetUnbox``1(System.IntPtr,System.String,System.Int32,System.IntPtr[])"/>.</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.RuntimeManager">
+            <summary>游戏运行时后端（Mono / Il2Cpp）自动检测与统一入口</summary>
+        </member>
+        <member name="P:StArray.ModManager.RuntimeAbstractions.RuntimeManager.Backend">
+            <summary>检测到的后端类型</summary>
+        </member>
+        <member name="P:StArray.ModManager.RuntimeAbstractions.RuntimeManager.IsAvailable">
+            <summary>是否已成功检测</summary>
+        </member>
+        <member name="P:StArray.ModManager.RuntimeAbstractions.RuntimeManager.IsMono">
+            <summary>是否 Mono 后端</summary>
+        </member>
+        <member name="P:StArray.ModManager.RuntimeAbstractions.RuntimeManager.IsIl2Cpp">
+            <summary>是否 Il2Cpp 后端</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.RuntimeManager.Detect">
+            <summary>自动检测当前进程加载了哪个运行时 DLL</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.RuntimeManager.SetBackend(StArray.ModManager.RuntimeAbstractions.RuntimeBackend)">
+            <summary>手动指定后端（用于非 Unity 或不明确环境）</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.RuntimeManager.GetDomain">
+            <summary>获取当前后端的 AppDomain</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.RuntimeManager.GetObjectClass(System.IntPtr)">
+            <summary>
+            从运行时对象取得其真实类型。
+            </summary>
+            <remarks>
+            泛型容器（例如游戏 AsyncInputManager 使用的 HashSet&lt;AsyncKeyCode&gt;）只有在对象实例
+            创建后才能拿到具体方法表。调用方可用返回的类型缓存 Add/Clear 等方法，避免每次事件
+            通过字符串重新解析。
+            </remarks>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.RuntimeBackend">
+            <summary>运行时后端类型</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.RuntimeObject`1">
+            <summary>
+            类型：RuntimeObject —— 通过 <see cref="M:StArray.ModManager.RuntimeAbstractions.RuntimeObject`1.GetInstance"/> 创建 <typeparamref name="T"/> 实例。
+            T 需继承 <see cref="T:StArray.ModManager.RuntimeAbstractions.UnmanagedObject"/> 并实现 <c>T(nint ptr)</c> 构造函数。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.RuntimeObject`1.GetInstance">
+            <summary>通过构造函数创建 T 实例。若指针指向静态类则抛异常。</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.RuntimeObject`1.IsStaticClass">
+            <summary>检查当前指针对应的运行时类型是否为静态类（abstract + sealed）。</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.UnityScreen">
+             <summary>
+             世界坐标 → ImGui 屏幕坐标。用于让绘制的 UI 跟随 Unity 组件位置。
+            
+             时序上适合在 <c>OnGUI</c> 里用：present hook 发生在 Unity 渲染之后，
+             此时 Transform 与相机矩阵都是本帧最终值，不存在一帧延迟。
+            
+             注意 il2cpp 的调用约定：<c>runtime_invoke</c> 的参数数组对<b>值类型传指向值的指针</b>，
+             对引用类型才直接传对象指针。所以 Vector3 参数放的是 <c>&amp;vec</c>。
+             返回的值类型是装箱对象，必须 unbox —— 这里统一走 <c>InvokeUnbox</c>。
+             </summary>
+        </member>
+        <member name="P:StArray.ModManager.RuntimeAbstractions.UnityScreen.CameraRefreshInterval">
+            <summary>Camera.main 缓存的刷新间隔（帧）。场景切换后旧指针会失效。</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.UnityScreen.Invalidate">
+            <summary>丢弃缓存的类型/方法/相机句柄，下次调用重新解析。切换场景或重载后可调用。</summary>
+        </member>
+        <member name="P:StArray.ModManager.RuntimeAbstractions.UnityScreen.MainCamera">
+            <summary>
+            当前主相机的 il2cpp 对象指针（带缓存）。Camera.main 内部是按 tag 查找，
+            每帧调用代价不小，所以缓存若干帧。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.UnityScreen.CameraPixelSize(System.IntPtr)">
+            <summary>相机的像素尺寸；取不到时回退到 ImGui 的显示尺寸。</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.UnityScreen.TryWorldToScreen(System.Numerics.Vector3,System.Numerics.Vector2@,System.Single@)">
+            <summary>
+            世界坐标 → ImGui 屏幕坐标。
+            </summary>
+            <param name="world">世界坐标</param>
+            <param name="screen">ImGui 坐标（原点左上，Y 向下）</param>
+            <param name="depth">到相机的距离（世界单位）；&lt;= 0 表示在相机背后</param>
+            <returns>是否位于相机前方 —— 背后时 <paramref name="screen"/> 无意义</returns>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.UnityScreen.TryWorldToScreen(System.Numerics.Vector3,System.Numerics.Vector2@)">
+            <inheritdoc cref="M:StArray.ModManager.RuntimeAbstractions.UnityScreen.TryWorldToScreen(System.Numerics.Vector3,System.Numerics.Vector2@,System.Single@)"/>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.UnityScreen.TryGetWorldPosition(System.IntPtr,System.Numerics.Vector3@)">
+            <summary>读取一个 Component / GameObject 的 Transform 世界坐标。</summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.UnityScreen.TryComponentToScreen(System.IntPtr,System.Numerics.Vector2@)">
+            <summary>组件位置 → ImGui 屏幕坐标，一步到位。</summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.UnmanagedEnumerable">
+            <summary>
+            Wraps a managed <c>IEnumerable</c> collection (List&lt;T&gt;, Queue, Stack, HashSet, etc.)
+            from Il2Cpp or Mono, exposing it as an enumerable sequence of <see cref="T:StArray.ModManager.RuntimeAbstractions.RuntimeObject"/>.
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.UnmanagedEnumerable`1">
+            <summary>
+            Typed variant — wraps an <c>IEnumerable&lt;T&gt;</c> and returns <typeparamref name="T"/> instances.
+            <typeparamref name="T"/> must inherit <see cref="T:StArray.ModManager.RuntimeAbstractions.UnmanagedObject"/> and expose a <c>T(nint ptr)</c> constructor.
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.RuntimeAbstractions.UnmanagedTypeNameAttribute">
+            <summary>
+            记录成员在运行时的真实类型名（含泛型参数），用于在存根里退化成 <c>nint</c> 的类型 ——
+            例如 <c>System.Collections.Generic.HashSet`1&lt;DLCManager&gt;</c>。
+            纯说明性质，不参与调用；拿到指针后可自行用
+            <see cref="T:StArray.ModManager.RuntimeAbstractions.UnmanagedEnumerable"/> 之类的包装器访问。
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.RuntimeAbstractions.UnmanagedTypeNameAttribute.#ctor(System.String)">
+            <summary>
+            记录成员在运行时的真实类型名（含泛型参数），用于在存根里退化成 <c>nint</c> 的类型 ——
+            例如 <c>System.Collections.Generic.HashSet`1&lt;DLCManager&gt;</c>。
+            纯说明性质，不参与调用；拿到指针后可自行用
+            <see cref="T:StArray.ModManager.RuntimeAbstractions.UnmanagedEnumerable"/> 之类的包装器访问。
+            </summary>
+        </member>
+        <member name="T:StArray.ModManager.UI.IImGuiRenderer">
+            <summary>
+            ImGui 渲染器接口 —— 抽象渲染管线，允许替换不同的渲染后端
+            </summary>
+        </member>
+        <member name="P:StArray.ModManager.UI.IImGuiRenderer.IsInitialized">
+            <summary>
+            是否已完成初始化
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.UI.IImGuiRenderer.Install">
+            <summary>
+            安装 Hook 并准备渲染管线
+            </summary>
+        </member>
+        <member name="M:StArray.ModManager.UI.IImGuiRenderer.InitImGui">
+            <summary>
+            初始化 ImGui 上下文 + 加载嵌入式字体 (文泉驿正黑 + FontAwesome 7 图标)
+            </summary>
+        </member>
+        <member name="E:StArray.ModManager.UI.IImGuiRenderer.OnRender">
+            <summary>
+            每帧 UI 构建回调（由渲染循环驱动）
+            </summary>
+        </member>
+        <member name="T:IconFonts.FontAwesome7">
+            <summary>Font Awesome 7 图标常量（自动生成，Unicode 私用区）</summary>
+        </member>
+    </members>
+</doc>

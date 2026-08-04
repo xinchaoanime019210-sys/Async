@@ -1,0 +1,5 @@
+MobilePlugin/bin/
+MobilePlugin/obj/
+tmp_package/
+*.zip
+*.log
