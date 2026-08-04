@@ -51,6 +51,7 @@ internal unsafe sealed class GameApi
 
     private readonly IRuntimeField? _controllerPaused;
     private readonly IRuntimeField? _controllerGameWorld;
+    private readonly IRuntimeField? _controllerInstance;
 
     private readonly IRuntimeField? _calibrationAngleRadians;
     private readonly IRuntimeField? _calibrationConductor;
@@ -78,6 +79,7 @@ internal unsafe sealed class GameApi
 
     private readonly IRuntimeMethod? _getConductor;
     private readonly IRuntimeMethod? _getConductorInstance;
+    private readonly IRuntimeMethod? _getController;
     private readonly IRuntimeMethod? _getPlanetConductor;
     private readonly IRuntimeMethod? _getCalibrationInput;
     private readonly IRuntimeMethod? _getAudioDspTime;
@@ -230,8 +232,9 @@ internal unsafe sealed class GameApi
         _systemIsCW = FindField(_systemClass, "isCW");
         _systemChosenPlanet = FindField(_systemClass, "chosenPlanet");
 
-        _controllerPaused = FindField(_controllerClass, "paused");
+        _controllerPaused = FindField(_controllerClass, "_paused", "paused");
         _controllerGameWorld = FindField(_controllerClass, "gameworld", "isGameWorld", "isgameworld");
+        _controllerInstance = FindField(_controllerClass, "_instance", "instance");
 
         _calibrationAngleRadians = FindField(_calibrationClass, "angleRadians");
         _calibrationConductor = FindField(_calibrationClass, "conductor");
@@ -259,6 +262,8 @@ internal unsafe sealed class GameApi
 
         _getConductor = _adoBaseClass?.GetMethod("get_conductor", 0);
         _getConductorInstance = _conductorClass.GetMethod("get_instance", 0);
+        _getController = _adoBaseClass?.GetMethod("get_controller", 0)
+            ?? _controllerClass?.GetMethod("get_instance", 0);
         _getPlanetConductor = _planetClass.GetMethod("get_conductor", 0);
         _getCalibrationInput = _conductorClass.GetMethod("get_calibration_i", 0);
         _getAudioDspTime = FindClassInDomain("UnityEngine", "AudioSettings")
@@ -392,6 +397,14 @@ internal unsafe sealed class GameApi
             return conductor;
         conductor = InvokeStaticObject(_getConductorInstance);
         return conductor != 0 ? conductor : Read(_conductorInstance, 0, nint.Zero);
+    }
+
+    internal nint GetController()
+    {
+        nint controller = InvokeStaticObject(_getController);
+        if (controller != 0)
+            return controller;
+        return Read(_controllerInstance, 0, nint.Zero);
     }
 
     internal nint GetPlanetConductor(nint planet)
@@ -570,6 +583,19 @@ internal unsafe sealed class GameApi
             || Read(_controllerGameWorld, controller, (byte)0) != 0;
     }
 
+    /// <summary>
+    /// 官方异步路径的启动条件。只用控制器所在的 gameworld 和暂停状态，不能把
+    /// currentState 写死成某个枚举值：移动版在倒计时、重开和自定义关卡切换时会
+    /// 短暂使用不同状态，但仍需要先让 scrConductor 建立官方帧时钟。
+    /// </summary>
+    internal bool IsOfficialInputContext()
+    {
+        nint controller = GetController();
+        return controller != 0
+            && !IsPaused(controller)
+            && IsGameplayController(controller);
+    }
+
     // ── 官方 AsyncInput 管线 ───────────────────────────────────
 
     /// <summary>读取官方 AsyncInputManager 中的帧时钟（兼容旧版本保留）。</summary>
@@ -595,11 +621,13 @@ internal unsafe sealed class GameApi
         if (!CanUseOfficialAsyncReplay || conductor == 0 || frameTick == 0UL)
             return false;
 
-        // Use the audio clock at the same point as the realtime sample. The
-        // conductor field can be one rendered frame old on a low-FPS device.
-        double dspTime = GetAudioDspTime();
+        // Match AsyncInputUtils.UpdateOffsetTime: it uses scrConductor.dspTime,
+        // which was sampled at the start of the same conductor frame. Reading
+        // AudioSettings first can pair a newer audio sample with an older wall
+        // tick on low-FPS devices and introduce a systematic early/late shift.
+        double dspTime = GetConductorDspTime(conductor);
         if (dspTime <= 0d)
-            dspTime = GetConductorDspTime(conductor);
+            dspTime = GetAudioDspTime();
         if (dspTime <= 0d)
             dspTime = GetCurrentDspTime(conductor);
         if (dspTime <= 0d)

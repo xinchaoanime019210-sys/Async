@@ -21,6 +21,8 @@ internal static class TouchQueue
     private static bool _subscribed;
     private static int _captureEnabled;
     private static long _receivedCount;
+    private static long _receivedDownCount;
+    private static long _receivedUpCount;
     private static long _droppedCount;
     private static long _staleCount;
     private static long _duplicateCount;
@@ -35,6 +37,10 @@ internal static class TouchQueue
     internal static int Count => Pending.Count;
 
     internal static long ReceivedCount => Interlocked.Read(ref _receivedCount);
+
+    internal static long ReceivedDownCount => Interlocked.Read(ref _receivedDownCount);
+
+    internal static long ReceivedUpCount => Interlocked.Read(ref _receivedUpCount);
 
     internal static long DroppedCount => Interlocked.Read(ref _droppedCount);
 
@@ -189,6 +195,8 @@ internal static class TouchQueue
     internal static void ResetStatistics()
     {
         Interlocked.Exchange(ref _receivedCount, 0L);
+        Interlocked.Exchange(ref _receivedDownCount, 0L);
+        Interlocked.Exchange(ref _receivedUpCount, 0L);
         Interlocked.Exchange(ref _droppedCount, 0L);
         Interlocked.Exchange(ref _staleCount, 0L);
         Interlocked.Exchange(ref _duplicateCount, 0L);
@@ -212,9 +220,12 @@ internal static class TouchQueue
         if (info.EventTimeNanos <= 0L)
             return;
 
-        long now = Stopwatch.GetTimestamp();
         lock (DedupLock)
         {
+            if (Volatile.Read(ref _captureEnabled) == 0)
+                return;
+
+            long now = Stopwatch.GetTimestamp();
             long elapsed = now - _lastEventDispatchTicks;
             if (_lastEventDispatchTicks != 0L
                 && elapsed >= 0L
@@ -227,13 +238,19 @@ internal static class TouchQueue
 
             _lastEvent = info;
             _lastEventDispatchTicks = now;
+
+            // Keep enqueue inside the same short lock as Clear(). Otherwise a
+            // callback that passed the enabled check just before a scene reset
+            // can append a stale event after the reset has already completed.
+            while (Pending.Count >= Capacity && Pending.TryDequeue(out _))
+                Interlocked.Increment(ref _droppedCount);
+
+            Pending.Enqueue(info);
+            Interlocked.Increment(ref _receivedCount);
+            if (info.Action is AndroidInput.MotionAction.Down or AndroidInput.MotionAction.PointerDown)
+                Interlocked.Increment(ref _receivedDownCount);
+            else if (info.Action is AndroidInput.MotionAction.Up or AndroidInput.MotionAction.PointerUp)
+                Interlocked.Increment(ref _receivedUpCount);
         }
-
-        // 满载时丢弃最旧事件。主线程会通过时间匹配和状态重建避免把后续事件静默错配。
-        while (Pending.Count >= Capacity && Pending.TryDequeue(out _))
-            Interlocked.Increment(ref _droppedCount);
-
-        Pending.Enqueue(info);
-        Interlocked.Increment(ref _receivedCount);
     }
 }

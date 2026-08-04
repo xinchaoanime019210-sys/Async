@@ -81,6 +81,10 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     private long _officialProcessFailures;
     private long _officialAngleRefreshes;
     private long _officialAngleRefreshFailures;
+    private long _officialClockCalls;
+    private long _officialPlayerControlCalls;
+    private long _officialBeginFailures;
+    private long _officialPrepareFailures;
     private int _lastOfficialBatchSize;
 
     /// <summary>是否启用异步输入。关闭后判定完全走游戏原版路径。</summary>
@@ -109,10 +113,14 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
 
     internal bool CanUseOfficialAsyncReplay => _game?.CanUseOfficialAsyncReplay == true;
 
-    // Keep the getter open only while the official clock was established. Failed
-    // menu/pause/replay frames must not suppress the game's normal input path.
+    // The game itself only calls AsyncInputUtils.UpdateOffsetTime after its
+    // isActive getter returns true. Do not gate this bootstrap on the clock that
+    // the getter is responsible for creating; use the controller context instead.
     internal bool ShouldReportOfficialActive =>
-        _active && Enabled && _officialClockReady && !ReplayCompatibility.IsPlaybackActive;
+        _active
+        && Enabled
+        && !ReplayCompatibility.IsPlaybackActive
+        && _game?.IsOfficialInputContext() == true;
 
     internal bool IsReplayPlaybackActive => ReplayCompatibility.IsPlaybackActive;
 
@@ -233,16 +241,17 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     }
 
     /// <summary>
-    /// AsyncInputUtils.UpdateOffsetTime 的替代时钟更新。只在已经确认 gameplay
-    /// capture 的窗口内接管原函数；菜单/暂停仍让游戏自己的实现运行。
+    /// AsyncInputUtils.UpdateOffsetTime 的替代时钟更新。先由 isActive getter
+    /// 启动官方帧时钟，再在该入口写入同一帧的 wall-to-DSP offset；菜单/暂停
+    /// 不会满足官方 gameplay context，因此仍保留游戏自己的实现。
     /// </summary>
     internal bool UpdateOfficialClock(long fixDivider)
     {
+        _officialClockCalls++;
         _ = fixDivider;
         GameApi? game = _game;
         if (!_active || !Enabled || game == null
-            || ReplayCompatibility.IsPlaybackActive
-            || _officialInputGateClosed)
+            || ReplayCompatibility.IsPlaybackActive)
         {
             return false;
         }
@@ -251,15 +260,21 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         if (conductor == 0)
             return false;
 
+        game.TryGetAsyncFrameTicks(
+            out ulong frameTick,
+            out ulong previousFrameTick);
         return PrepareOfficialFrameClock(
             game,
             conductor,
-            ClockSync.GetMonotonicNanos());
+            ClockSync.GetMonotonicNanos(),
+            frameTick,
+            previousFrameTick);
     }
 
     /// <summary>在稳定的 PlayerControl_Update 入口打开官方输入窗口并消费事件。</summary>
     internal bool BeginOfficialPlayerControlFrame(nint controller)
     {
+        _officialPlayerControlCalls++;
         GameApi? game = _game;
         if (!_active || !Enabled || game == null || controller == 0)
             return false;
@@ -276,10 +291,15 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
 
         try
         {
+            game.TryGetAsyncFrameTicks(
+                out ulong frameTick,
+                out ulong previousFrameTick);
             return BeginOfficialAsyncFrame(
                 controller,
                 conductor,
-                ClockSync.GetMonotonicNanos());
+                ClockSync.GetMonotonicNanos(),
+                frameTick,
+                previousFrameTick);
         }
         catch
         {
@@ -323,11 +343,17 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     private bool PrepareOfficialFrameClock(
         GameApi game,
         nint conductor,
-        long monotonicBeforeNanos)
+        long monotonicBeforeNanos,
+        ulong frameTick,
+        ulong previousFrameTick)
     {
-        ulong frameTick = (ulong)Math.Max(0L, ClockSync.GetRealtimeTicks());
+        if (frameTick == 0UL)
+            frameTick = (ulong)Math.Max(0L, ClockSync.GetRealtimeTicks());
         if (frameTick == 0UL || frameTick > long.MaxValue)
+        {
+            _officialPrepareFailures++;
             return false;
+        }
 
         long monotonicAfterNanos = ClockSync.GetMonotonicNanos();
         if (!UpdateWallAnchorFromFrame(
@@ -338,17 +364,20 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
                 out _,
                 out bool wallClockJumped))
         {
+            _officialPrepareFailures++;
             return false;
         }
 
         if (wallClockJumped)
         {
+            _officialPrepareFailures++;
             _clockResets++;
             CloseOfficialInput(game, clearQueue: true);
             return false;
         }
 
-        ulong previousFrameTick = _lastOfficialFrameTick;
+        if (previousFrameTick == 0UL || frameTick < previousFrameTick)
+            previousFrameTick = _lastOfficialFrameTick;
         if (previousFrameTick == 0UL || frameTick < previousFrameTick)
             previousFrameTick = frameTick;
 
@@ -358,6 +387,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
                 previousFrameTick,
                 out ulong offsetTick))
         {
+            _officialPrepareFailures++;
             return false;
         }
 
@@ -409,7 +439,9 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     internal bool BeginOfficialAsyncFrame(
         nint controller,
         nint conductor,
-        long monotonicBeforeNanos)
+        long monotonicBeforeNanos,
+        ulong frameTick,
+        ulong previousFrameTick)
     {
         GameApi? game = _game;
         if (!_active || !Enabled || game == null || controller == 0 || conductor == 0)
@@ -450,8 +482,14 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             game.ResetAsyncInputState();
         }
 
-        if (!PrepareOfficialFrameClock(game, conductor, monotonicBeforeNanos))
+        if (!PrepareOfficialFrameClock(
+                game,
+                conductor,
+                monotonicBeforeNanos,
+                frameTick,
+                previousFrameTick))
         {
+            _officialBeginFailures++;
             CloseOfficialInput(game, clearQueue: true);
             return false;
         }
@@ -464,6 +502,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         game.ClearAsyncInputEdges();
         if (!game.SetAsyncInputTypes(true))
         {
+            _officialBeginFailures++;
             CloseOfficialInput(game, clearQueue: true);
             return false;
         }
@@ -1122,6 +1161,10 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         ImGui.Separator();
         ImGui.TextUnformatted($"官方处理帧: {_officialFrames}");
         ImGui.TextUnformatted($"官方消费事件: {_officialEvents}");
+        ImGui.TextUnformatted($"官方时钟 Hook 调用: {_officialClockCalls}");
+        ImGui.TextUnformatted($"PlayerControl_Update 调用/成功: {_officialPlayerControlCalls}/{_officialFrames}");
+        ImGui.TextUnformatted($"官方准备失败: {_officialPrepareFailures}");
+        ImGui.TextUnformatted($"官方帧启动失败: {_officialBeginFailures}");
         ImGui.TextUnformatted($"最近帧事件批次: {_lastOfficialBatchSize}");
         ImGui.TextUnformatted($"官方处理失败: {_officialProcessFailures}");
         ImGui.TextUnformatted($"官方角度刷新: {_officialAngleRefreshes}");
@@ -1134,7 +1177,9 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         ImGui.TextUnformatted($"校准未修正: {_missedCalibrationSamples}");
         ImGui.TextUnformatted($"校准过期丢弃: {_rejectedCalibrationSamples}");
         ImGui.TextUnformatted($"时钟复位次数: {_clockResets}");
-        ImGui.TextUnformatted($"收到触摸事件: {TouchQueue.ReceivedCount}");
+        ImGui.TextUnformatted(
+            $"收到触摸事件: {TouchQueue.ReceivedCount} "
+            + $"(Down {TouchQueue.ReceivedDownCount} / Up {TouchQueue.ReceivedUpCount})");
         ImGui.TextUnformatted($"队列溢出丢弃: {TouchQueue.DroppedCount}");
         ImGui.TextUnformatted($"过期/无效事件: {TouchQueue.StaleCount}");
         ImGui.TextUnformatted($"重复广播去重: {TouchQueue.DuplicateCount}");
@@ -1151,6 +1196,10 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             _rejectedCalibrationSamples = 0;
             _officialFrames = 0;
             _officialEvents = 0;
+            _officialClockCalls = 0;
+            _officialPlayerControlCalls = 0;
+            _officialBeginFailures = 0;
+            _officialPrepareFailures = 0;
             _officialProcessFailures = 0;
             _officialAngleRefreshes = 0;
             _officialAngleRefreshFailures = 0;

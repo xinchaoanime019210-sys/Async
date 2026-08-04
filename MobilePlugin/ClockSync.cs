@@ -14,11 +14,9 @@ namespace AsyncInput.Mobile;
 /// </remarks>
 internal sealed class ClockSync
 {
-    private const int ClockRealtime = 0;
     private const int ClockMonotonic = 1;
     private const double NanosPerSecond = 1_000_000_000d;
     private const long NanosPerDateTimeTick = 100L;
-    private const long UnixEpochTicks = 621355968000000000L;
 
     private const int NativeClockUnknown = 0;
     private const int NativeClockAvailable = 1;
@@ -173,27 +171,17 @@ internal sealed class ClockSync
     }
 
     /// <summary>
-    /// 读取 UTC DateTime-like tick。官方 PC async 输入使用同一数量级的 wall tick。
+    /// 读取与游戏官方帧相同的本地 DateTime tick。PC/Unity 官方代码使用
+    /// <c>DateTime.Now.Ticks</c>，不是 UtcNow；直接复用托管实现可避免在非 UTC
+    /// 时区把事件整体平移数小时。该函数只用于没有读取到官方 currFrameTick 的
+    /// 启动兜底，正常 gameplay 会优先使用游戏自己写入的帧 tick。
     /// </summary>
     internal static long GetRealtimeTicks()
     {
-        if (TryGetNativeTime(ClockRealtime, out Timespec nativeNow))
-        {
-            try
-            {
-                return checked(
-                    UnixEpochTicks
-                    + checked(nativeNow.Seconds * 10_000_000L)
-                    + nativeNow.Nanoseconds / NanosPerDateTimeTick);
-            }
-            catch (OverflowException)
-            {
-                // 交给托管时钟回退。
-            }
-        }
-
-        // 在非 Android 的构建/测试环境中回退到托管时钟。
-        return DateTime.UtcNow.Ticks;
+        // DateTime.Now.Ticks is the domain used by the game's
+        // AsyncInputManager.currFrameTick. Do not replace this with UTC ticks:
+        // DateTime.Now.Ticks includes the device's local offset.
+        return DateTime.Now.Ticks;
     }
 
     /// <summary>场景切换、重开、暂停恢复后丢弃所有时钟锚点。</summary>
