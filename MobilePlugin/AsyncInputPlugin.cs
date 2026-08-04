@@ -12,7 +12,8 @@ namespace AsyncInput.Mobile;
 /// <para>
 /// 首选路径复用游戏自己的 <c>ProcessKeyInputs</c> 和
 /// <c>AsyncRefreshAngles</c>：Android 输入线程只记录内核时间戳，Unity 主线程在
-/// <c>PlayerControl_Update</c> 前按事件时间更新 AsyncInput mask，并逐批把事件送进游戏。
+/// <c>scrController.PlayerControl_Update</c> 内按事件时间更新 AsyncInput mask，
+/// 并逐批把事件送进游戏。
 /// 这样一次渲染帧内的多次输入不会被合并成一次，也不会被当前帧采样时间替代。
 /// </para>
 /// <para>
@@ -30,8 +31,11 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     /// <summary>回退路径和校准样本允许的最大延迟。</summary>
     private const double MaxEventAgeSeconds = 0.25d;
 
-    private const double FutureEventToleranceSeconds = 0.005d;
-    private const long FutureEventToleranceNanos = 5_000_000L;
+    // Do not simulate an input several milliseconds before its hardware time.
+    // A small 0.25 ms allowance covers dispatch/read jitter without widening the
+    // judgement window in the early direction.
+    private const double FutureEventToleranceSeconds = 0.00025d;
+    private const long FutureEventToleranceNanos = 250_000L;
     private const long WallTicksPerMillisecond = 10_000L;
 
     // AsyncKeyCode 的六组 mask 使用同一组 slot。实际游戏最多只会取前几根有效输入，
@@ -49,12 +53,17 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     // 四组 edge mask 在一次 PlayerControl_Update 内保留本帧已发生的边沿。
     private ulong _heldMask;
     private ulong _pointerActiveMask;
-    private ulong _previousOfficialFrameTick;
     private long _lastObservedDropCount;
     private bool _officialInputTypesEnabled;
     private bool _officialClockReady;
     // 避免暂停、菜单或禁用状态下每帧重复清空六组官方 HashSet。
     private bool _officialInputGateClosed;
+    // Frame ticks are established by the stable UpdateOffsetTime/PlayerControl
+    // hooks. Keep the most recent bridge sample separate from the event queue.
+    private ulong _lastOfficialFrameTick;
+    private ulong _preparedFrameTick;
+    private ulong _preparedOffsetTick;
+    private ulong _lastOfficialReplayTick;
 
     // ── 调试统计（仅供 HUD 显示） ──
     private double _lastCorrectionMillis;
@@ -70,6 +79,8 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     private long _officialFrames;
     private long _officialEvents;
     private long _officialProcessFailures;
+    private long _officialAngleRefreshes;
+    private long _officialAngleRefreshFailures;
     private int _lastOfficialBatchSize;
 
     /// <summary>是否启用异步输入。关闭后判定完全走游戏原版路径。</summary>
@@ -98,6 +109,18 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
 
     internal bool CanUseOfficialAsyncReplay => _game?.CanUseOfficialAsyncReplay == true;
 
+    // Keep the getter open only while the official clock was established. Failed
+    // menu/pause/replay frames must not suppress the game's normal input path.
+    internal bool ShouldReportOfficialActive =>
+        _active && Enabled && _officialClockReady && !ReplayCompatibility.IsPlaybackActive;
+
+    internal bool IsReplayPlaybackActive => ReplayCompatibility.IsPlaybackActive;
+
+    internal void CloseInputForReplay()
+    {
+        CloseOfficialInput(_game, clearQueue: true);
+    }
+
     public void OnLoad()
     {
         _game = GameApi.Create();
@@ -119,9 +142,9 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
 
             TouchQueue.Subscribe();
             _active = true;
-            // 校准页没有统一的进入 Hook，因此 Mod 活跃时持续接收轻量时间戳事件；
-            // 进入关卡、暂停和恢复边界都会清空队列，菜单触摸不会进入判定链路。
-            TouchQueue.SetCaptureEnabled(true);
+            // 官方路径的捕获由 PlayerControl_Update 在确认 gameplay 后打开；
+            // 这样菜单和暂停触摸不会在等待官方帧时积压。
+            ResetClock(capture: true);
             _lastObservedDropCount = TouchQueue.DroppedCount;
         }
         catch
@@ -160,32 +183,189 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     }
 
     /// <summary>
-    /// 更新 monotonic 到 wall tick 的锚点。官方游戏使用 DateTime tick，Android
-    /// 触摸事件使用 CLOCK_MONOTONIC；夹心采样让两者之间只剩下系统调用窗口误差。
+    /// 用当前 realtime tick 建立 monotonic 到 wall 的锚点。目标 Android 版本的
+    /// AsyncInputUtils.UpdateOffsetTime/PlayerControl_Update 是官方 async 路径的
+    /// 稳定驱动，不能依赖 scrConductor.Update 或 UpdateInput 的短 stub。
     /// </summary>
-    private bool UpdateWallAnchor(
+    private bool UpdateWallAnchorFromFrame(
+        ulong frameTick,
+        long monotonicBeforeNanos,
+        long monotonicAfterNanos,
         out long monotonicNowNanos,
         out long wallNowTicks,
         out bool jumped)
     {
-        monotonicNowNanos = 0L;
+        monotonicNowNanos = monotonicAfterNanos;
         wallNowTicks = 0L;
         jumped = false;
 
-        long before = ClockSync.GetMonotonicNanos();
-        long realtimeTicks = ClockSync.GetRealtimeTicks();
-        long after = ClockSync.GetMonotonicNanos();
-        if (before <= 0L || after < before || realtimeTicks <= 0L)
+        if (frameTick == 0UL || frameTick > long.MaxValue
+            || monotonicAfterNanos <= 0L)
+        {
             return false;
+        }
+
+        if (monotonicBeforeNanos <= 0L || monotonicAfterNanos < monotonicBeforeNanos)
+            monotonicBeforeNanos = monotonicAfterNanos;
 
         lock (_stateLock)
         {
-            jumped = _clock.UpdateWallAnchor(realtimeTicks, before, after);
-            wallNowTicks = _clock.GetWallTicks(after);
+            jumped = _clock.UpdateWallAnchor(
+                (long)frameTick,
+                monotonicBeforeNanos,
+                monotonicAfterNanos);
+
+            // A slow native/managed frame can exceed the sandwich window. The
+            // frame tick is still a valid wall sample; use the post sample rather
+            // than leaving the official path permanently uninitialized.
+            if (!_clock.IsWallReady)
+            {
+                jumped = _clock.UpdateWallAnchor(
+                    (long)frameTick,
+                    monotonicAfterNanos,
+                    monotonicAfterNanos);
+            }
+
+            wallNowTicks = (long)frameTick;
         }
 
-        monotonicNowNanos = after;
         return wallNowTicks > 0L;
+    }
+
+    /// <summary>
+    /// AsyncInputUtils.UpdateOffsetTime 的替代时钟更新。只在已经确认 gameplay
+    /// capture 的窗口内接管原函数；菜单/暂停仍让游戏自己的实现运行。
+    /// </summary>
+    internal bool UpdateOfficialClock(long fixDivider)
+    {
+        _ = fixDivider;
+        GameApi? game = _game;
+        if (!_active || !Enabled || game == null
+            || ReplayCompatibility.IsPlaybackActive
+            || _officialInputGateClosed)
+        {
+            return false;
+        }
+
+        nint conductor = game.GetConductor();
+        if (conductor == 0)
+            return false;
+
+        return PrepareOfficialFrameClock(
+            game,
+            conductor,
+            ClockSync.GetMonotonicNanos());
+    }
+
+    /// <summary>在稳定的 PlayerControl_Update 入口打开官方输入窗口并消费事件。</summary>
+    internal bool BeginOfficialPlayerControlFrame(nint controller)
+    {
+        GameApi? game = _game;
+        if (!_active || !Enabled || game == null || controller == 0)
+            return false;
+
+        if (ReplayCompatibility.IsPlaybackActive)
+        {
+            CloseOfficialInput(game, clearQueue: true);
+            return false;
+        }
+
+        nint conductor = game.GetConductor();
+        if (conductor == 0)
+            return false;
+
+        try
+        {
+            return BeginOfficialAsyncFrame(
+                controller,
+                conductor,
+                ClockSync.GetMonotonicNanos());
+        }
+        catch
+        {
+            CloseOfficialInput(game, clearQueue: true);
+            throw;
+        }
+    }
+
+    /// <summary>结束 PlayerControl_Update 的官方输入窗口。</summary>
+    internal void EndOfficialPlayerControlFrame()
+    {
+        EndOfficialAsyncFrame();
+        _preparedFrameTick = 0UL;
+        _preparedOffsetTick = 0UL;
+        _lastOfficialReplayTick = 0UL;
+    }
+
+    /// <summary>
+    /// PlayerControl_Update 的原始逻辑可能在官方判定后再次刷新普通帧角度。
+    /// 有异步事件时在该调用末尾投影回当前帧，保证视觉状态与判定状态一致。
+    /// </summary>
+    internal void RestoreOfficialFrameAngle(nint controller)
+    {
+        if (_lastOfficialReplayTick == 0UL || _preparedFrameTick == 0UL)
+            return;
+
+        GameApi? game = _game;
+        if (game != null && game.RestoreAsyncAngleToTick(
+                controller,
+                _preparedFrameTick,
+                _preparedOffsetTick))
+        {
+            _officialAngleRefreshes++;
+        }
+        else
+        {
+            _officialAngleRefreshFailures++;
+        }
+    }
+
+    private bool PrepareOfficialFrameClock(
+        GameApi game,
+        nint conductor,
+        long monotonicBeforeNanos)
+    {
+        ulong frameTick = (ulong)Math.Max(0L, ClockSync.GetRealtimeTicks());
+        if (frameTick == 0UL || frameTick > long.MaxValue)
+            return false;
+
+        long monotonicAfterNanos = ClockSync.GetMonotonicNanos();
+        if (!UpdateWallAnchorFromFrame(
+                frameTick,
+                monotonicBeforeNanos,
+                monotonicAfterNanos,
+                out _,
+                out _,
+                out bool wallClockJumped))
+        {
+            return false;
+        }
+
+        if (wallClockJumped)
+        {
+            _clockResets++;
+            CloseOfficialInput(game, clearQueue: true);
+            return false;
+        }
+
+        ulong previousFrameTick = _lastOfficialFrameTick;
+        if (previousFrameTick == 0UL || frameTick < previousFrameTick)
+            previousFrameTick = frameTick;
+
+        if (!game.PrepareAsyncFrame(
+                conductor,
+                frameTick,
+                previousFrameTick,
+                out ulong offsetTick))
+        {
+            return false;
+        }
+
+        _lastOfficialFrameTick = frameTick;
+        _preparedFrameTick = frameTick;
+        _preparedOffsetTick = offsetTick;
+        _officialClockReady = true;
+        return true;
     }
 
     /// <summary>
@@ -226,13 +406,22 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     /// 官方 AsyncInput 路径的帧入口。事件按时间分组，顺序与 PC 版 UpdateInput 相同：
     /// 先处理上一时间组，再清理普通 edge mask，最后更新下一组事件。
     /// </summary>
-    internal bool BeginOfficialAsyncFrame(nint controller)
+    internal bool BeginOfficialAsyncFrame(
+        nint controller,
+        nint conductor,
+        long monotonicBeforeNanos)
     {
         GameApi? game = _game;
-        if (!_active || !Enabled || game == null || controller == 0)
+        if (!_active || !Enabled || game == null || controller == 0 || conductor == 0)
         {
             if (!Enabled)
                 CloseOfficialInput(game, clearQueue: true);
+            return false;
+        }
+
+        if (ReplayCompatibility.IsPlaybackActive)
+        {
+            CloseOfficialInput(game, clearQueue: true);
             return false;
         }
 
@@ -261,40 +450,21 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             game.ResetAsyncInputState();
         }
 
-        if (!UpdateWallAnchor(
-                out long monotonicNowNanos,
-                out long wallNowTicks,
-                out bool wallClockJumped))
+        if (!PrepareOfficialFrameClock(game, conductor, monotonicBeforeNanos))
         {
+            CloseOfficialInput(game, clearQueue: true);
             return false;
         }
 
-        if (wallClockJumped)
-        {
-            _clockResets++;
-            TouchQueue.Clear();
-            ResetOfficialInputState(clearQueue: false);
-            game.ResetAsyncInputState();
-            return false;
-        }
-
-        if (!game.PrepareAsyncFrame(
-                (ulong)wallNowTicks,
-                _previousOfficialFrameTick == 0UL
-                    ? 0UL
-                    : _previousOfficialFrameTick,
-                out ulong offsetTick))
-        {
-            return false;
-        }
+        ulong offsetTick = _preparedOffsetTick;
+        long monotonicNowNanos = ClockSync.GetMonotonicNanos();
 
         _officialClockReady = true;
-        _previousOfficialFrameTick = (ulong)wallNowTicks;
+        _lastOfficialReplayTick = 0UL;
         game.ClearAsyncInputEdges();
         if (!game.SetAsyncInputTypes(true))
         {
-            game.ResetAsyncInputState();
-            game.SetAsyncInputTypes(false);
+            CloseOfficialInput(game, clearQueue: true);
             return false;
         }
 
@@ -337,7 +507,8 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
                         batchUpMask,
                         frameMask,
                         frameDownMask,
-                        frameUpMask))
+                        frameUpMask,
+                        offsetTick))
                 {
                     AbortOfficialFrame(game);
                     return false;
@@ -373,7 +544,8 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
                     batchUpMask,
                     frameMask,
                     frameDownMask,
-                    frameUpMask))
+                    frameUpMask,
+                    offsetTick))
             {
                 AbortOfficialFrame(game);
                 return false;
@@ -383,19 +555,17 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         else if (!ProcessOfficialBatch(
                      game,
                      controller,
-                     (ulong)wallNowTicks,
+                     0UL,
                      0UL,
                      0UL,
                      _heldMask,
                      0UL,
-                     0UL))
+                     0UL,
+                     offsetTick))
         {
             AbortOfficialFrame(game);
             return false;
         }
-
-        if (haveEvent)
-            game.RestoreAsyncAngleToTick(controller, (ulong)wallNowTicks, offsetTick);
 
         _officialFrames++;
         _officialEvents += consumed;
@@ -428,7 +598,8 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         ulong batchUpMask,
         ulong frameMask,
         ulong frameDownMask,
-        ulong frameUpMask)
+        ulong frameUpMask,
+        ulong offsetTick)
     {
         if (!game.ApplyAsyncInputMasks(
                 _heldMask,
@@ -448,14 +619,20 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             return false;
         }
 
+        if (eventTick != 0UL && game.RestoreAsyncAngleToTick(controller, eventTick, offsetTick))
+            _officialAngleRefreshes++;
+        else if (eventTick != 0UL)
+            _officialAngleRefreshFailures++;
+
+        if (eventTick != 0UL)
+            _lastOfficialReplayTick = eventTick;
+
         return true;
     }
 
     private void AbortOfficialFrame(GameApi game)
     {
-        game.ResetAsyncInputState();
-        ResetOfficialInputState(clearQueue: false);
-        EndOfficialAsyncFrame();
+        CloseOfficialInput(game, clearQueue: true);
     }
 
     /// <summary>
@@ -467,6 +644,10 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             return;
 
         _officialInputGateClosed = true;
+        _officialClockReady = false;
+        _lastOfficialFrameTick = 0UL;
+        _preparedFrameTick = 0UL;
+        _preparedOffsetTick = 0UL;
         TouchQueue.SetCaptureEnabled(false);
         ResetOfficialInputState(clearQueue);
         game?.ResetAsyncInputState();
@@ -667,7 +848,6 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     private void ResetOfficialInputState(bool clearQueue)
     {
         ResetPointerState();
-        _previousOfficialFrameTick = 0UL;
         if (clearQueue)
         {
             TouchQueue.Clear();
@@ -678,7 +858,9 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     /// <summary>场景切换、重开、暂停恢复后音频时钟和事件序列都必须重建。</summary>
     internal void ResetClock(bool capture)
     {
-        if (!capture)
+        GameApi? game = _game;
+        bool officialPath = game?.CanUseOfficialAsyncReplay == true;
+        if (!capture || officialPath)
             TouchQueue.SetCaptureEnabled(false);
         else
         {
@@ -686,15 +868,20 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             TouchQueue.SetCaptureEnabled(true);
         }
 
-        GameApi? game = _game;
         if (game?.CanUseOfficialAsyncReplay == true)
         {
             game.ResetAsyncInputState();
             game.SetAsyncInputTypes(false);
         }
         _officialInputTypesEnabled = false;
-        _officialInputGateClosed = !capture;
+        // Official capture is opened by PlayerControl_Update after the controller
+        // is confirmed to be in gameplay. This prevents menu/reset events from
+        // accumulating while no official frame can consume them.
+        _officialInputGateClosed = !capture || officialPath;
         _officialClockReady = false;
+        _lastOfficialFrameTick = 0UL;
+        _preparedFrameTick = 0UL;
+        _preparedOffsetTick = 0UL;
 
         lock (_stateLock)
         {
@@ -937,6 +1124,8 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         ImGui.TextUnformatted($"官方消费事件: {_officialEvents}");
         ImGui.TextUnformatted($"最近帧事件批次: {_lastOfficialBatchSize}");
         ImGui.TextUnformatted($"官方处理失败: {_officialProcessFailures}");
+        ImGui.TextUnformatted($"官方角度刷新: {_officialAngleRefreshes}");
+        ImGui.TextUnformatted($"官方角度刷新失败: {_officialAngleRefreshFailures}");
         ImGui.Separator();
         ImGui.TextUnformatted($"回退已修正判定: {_adjustedHits}");
         ImGui.TextUnformatted($"回退未修正判定: {_missedHits}");
@@ -948,6 +1137,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         ImGui.TextUnformatted($"收到触摸事件: {TouchQueue.ReceivedCount}");
         ImGui.TextUnformatted($"队列溢出丢弃: {TouchQueue.DroppedCount}");
         ImGui.TextUnformatted($"过期/无效事件: {TouchQueue.StaleCount}");
+        ImGui.TextUnformatted($"重复广播去重: {TouchQueue.DuplicateCount}");
         ImGui.TextUnformatted($"待处理触摸事件: {TouchQueue.Count}");
 
         if (ImGui.Button("重置统计"))
@@ -962,6 +1152,8 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             _officialFrames = 0;
             _officialEvents = 0;
             _officialProcessFailures = 0;
+            _officialAngleRefreshes = 0;
+            _officialAngleRefreshFailures = 0;
             _lastOfficialBatchSize = 0;
             _lastCorrectionMillis = 0d;
             _avgCorrectionMillis = 0d;

@@ -28,10 +28,15 @@ PC 版的异步输入并不是「提前读取输入」，而是使用硬件事�
 ## 输入链路
 
 输入时间戳由 ModManager 已安装的 `libinput.so` Hook 广播，本 Mod 不重复 Hook 原生输入层。
-Android 输入线程只做值类型快照入队；游戏主线程在 `PlayerControl_Update` 前按时间批量消费，
+Android 输入线程只做值类型快照入队；游戏主线程在
+`scrController.PlayerControl_Update` 中按时间批量消费，
 同一帧可处理多笔事件。
 
-官方路径使用 `scrController.PlayerControl_Update` 和 `AsyncInputManager.get_isActive`。
+官方路径使用 `AsyncInputUtils.UpdateOffsetTime`、
+`scrController.PlayerControl_Update` 和 `AsyncInputManager.get_isActive`。
+目标 Android 版本的 `scrController.UpdateInput` 是短 `ret` stub，不能作为 inline
+Hook；帧 tick 由 realtime 与 AudioSettings.dspTime 在稳定入口重新建立。
+Replay 已移除同目标 Hook，因此两个 Mod 可以同时启用。
 只有官方路径不可用时才安装旧版 `Hit`/`UpdateHoldKeys` 回退 Hook，因此回退模式可能与占用这些
 方法的其他 Mod 冲突；日志会记录最终使用的入口。
 
@@ -75,7 +80,7 @@ mods/
 
 打开「显示调试信息」后：
 
-1. **输入入口**：应显示 `scrController.ProcessKeyInputs`。
+1. **输入入口**：应显示 `scrController.ProcessKeyInputs (PlayerControl_Update driver)`。
 2. **官方处理帧/消费事件**：游玩时应持续增加；低帧率下单帧可能消费多笔事件。
 3. **Wall 基准**：进入关卡后应显示「已建立」。暂停、恢复、重开后会重新建立。
 4. **队列溢出丢弃**：正常游玩应为 0；非 0 时会主动清空持有状态，避免卡住按键。
@@ -93,11 +98,14 @@ angle = snappedLastAngle
 ```
 
 官方 replay 的 event tick 使用 `DateTime` 数量级的 wall tick。
-帧 tick 来自 `CLOCK_REALTIME`，触摸事件来自 `CLOCK_MONOTONIC`；两者通过每帧更新的
-`uptime -> wall -> uptime` 夹心锚点换算。优先调用 Android `libc.so` 的
+帧 tick 来自游戏自己的 `DateTime.Now.Ticks`，触摸事件来自 `CLOCK_MONOTONIC`；两者通过
+每帧更新的 `frame tick -> uptime` 夹心锚点换算。优先调用 Android `libc.so` 的
 `CLOCK_MONOTONIC`；运行时无法解析 native 符号时固定回退到同源的 `Stopwatch` 单调时钟，
 避免因 P/Invoke 失败让 wall 基准永远无法建立。检测到系统时钟阶跃时清空队列并等待下一帧重建，
 避免把暂停或锁屏期间的旧事件投影到新歌曲时间轴。
 
-官方六组 mask 分别保存非帧依赖/帧依赖的持有状态，以及两套 Down/Up 边沿；触点使用稳定 slot，
-不会把多指输入折叠成单个事件。处理完旧事件后会把选中行星恢复到当前帧，并同步 `cachedAngle`。
+官方六组 mask 分别保存非帧依赖/帧依赖的持有状态，以及两套 Down/Up 边沿；
+`AsyncKeyCode` 按 IL2CPP 的 8 字节布局写入；触点使用稳定 slot，
+不会把多指输入折叠成单个事件。每个事件批次返回后用同一事件 tick 再调用一次
+`AsyncRefreshAngles` 与直接的官方角度公式回写，避免 `Hit` 末尾的普通角度刷新覆盖异步角度；
+原始 PlayerControl_Update 完成后再投影到当前帧。

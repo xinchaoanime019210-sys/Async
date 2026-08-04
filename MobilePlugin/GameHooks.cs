@@ -26,7 +26,8 @@ public static partial class GameHooks
     /// <summary>当前实际使用的输入注入入口，供调试 HUD 和日志使用。</summary>
     internal static string InputHookName => _inputHookMode switch
     {
-        InputHookMode.OfficialProcessKeyInputs => "scrController.ProcessKeyInputs",
+        InputHookMode.OfficialProcessKeyInputs =>
+            "scrController.ProcessKeyInputs (PlayerControl_Update driver)",
         InputHookMode.HitFallback => "scrPlayer.Hit",
         InputHookMode.UpdateHoldKeysFallback => "scrPlayer.UpdateHoldKeys",
         _ => "none",
@@ -50,21 +51,28 @@ public static partial class GameHooks
             Uninstall();
             _plugin = plugin;
 
-            // 首选官方管线：原始事件直接进入 ProcessKeyInputs(eventTick)，一帧可处理多笔。
+            // 首选官方管线：目标 Android 版本的 UpdateInput 是短 ret stub，不能
+            // 做 inline hook。官方稳定路线是拦截 UpdateOffsetTime 建立帧时钟，
+            // 再从 PlayerControl_Update 驱动 ProcessKeyInputs。
             if (plugin.CanUseOfficialAsyncReplay)
             {
-                bool updateInstalled = TryInstall(
+                bool clockInstalled = TryInstall(
+                    "AsyncInputUtils.UpdateOffsetTime",
+                    Install_AsyncInputUtilsUpdateOffsetTime,
+                    Uninstall_AsyncInputUtilsUpdateOffsetTime,
+                    Abandon_AsyncInputUtilsUpdateOffsetTime);
+                bool playerControlInstalled = clockInstalled && TryInstall(
                     "scrController.PlayerControl_Update",
                     Install_PlayerControlUpdate,
                     Uninstall_PlayerControlUpdate,
                     Abandon_PlayerControlUpdate);
-                bool activeInstalled = updateInstalled && TryInstall(
+                bool activeInstalled = playerControlInstalled && TryInstall(
                     "AsyncInputManager.get_isActive",
                     Install_AsyncInputIsActive,
                     Uninstall_AsyncInputIsActive,
                     Abandon_AsyncInputIsActive);
 
-                if (updateInstalled && activeInstalled)
+                if (clockInstalled && playerControlInstalled && activeInstalled)
                 {
                     _inputHookMode = InputHookMode.OfficialProcessKeyInputs;
                 }
@@ -201,6 +209,16 @@ public static partial class GameHooks
         InputHookAvailable = false;
     }
 
+    private static void Uninstall_AsyncInputUtilsUpdateOffsetTime()
+    {
+        if (_AsyncInputUtilsUpdateOffsetTime_origPtr == nint.Zero)
+            return;
+        HookHelper.Unhook(_AsyncInputUtilsUpdateOffsetTime_origPtr);
+        _AsyncInputUtilsUpdateOffsetTime_origPtr = nint.Zero;
+        _AsyncInputUtilsUpdateOffsetTime_orig = null;
+        _AsyncInputUtilsUpdateOffsetTime_wrap = null;
+    }
+
     private static void Uninstall_PlayerControlUpdate()
     {
         if (_PlayerControlUpdate_origPtr == nint.Zero)
@@ -272,6 +290,13 @@ public static partial class GameHooks
     }
 
     // 失败安装只清空 Source Generator 的持久字段，不调用 Unhook。
+    private static void Abandon_AsyncInputUtilsUpdateOffsetTime()
+    {
+        _AsyncInputUtilsUpdateOffsetTime_origPtr = nint.Zero;
+        _AsyncInputUtilsUpdateOffsetTime_orig = null;
+        _AsyncInputUtilsUpdateOffsetTime_wrap = null;
+    }
+
     private static void Abandon_PlayerControlUpdate()
     {
         _PlayerControlUpdate_origPtr = nint.Zero;
@@ -322,8 +347,34 @@ public static partial class GameHooks
     }
 
     /// <summary>
-    /// 官方异步管线的稳定驱动点。它在一次 Unity 帧内批量把所有到期触摸送入
-    /// scrController.ProcessKeyInputs(eventTick)，原版状态机负责后续判定和副作用。
+    /// 官方时钟入口。UpdateOffsetTime 的原始实现会按普通帧路径刷新 async offset；
+    /// gameplay 捕获开启后由 Mod 用 realtime/DSP 同步结果替代，避免依赖 UpdateInput
+    /// 这个短 stub。
+    /// </summary>
+    [UnmanagedHook("Assembly-CSharp.dll", "AsyncInputUtils", "UpdateOffsetTime", ParameterCount = 1)]
+    private static void AsyncInputUtilsUpdateOffsetTime(long fixDivider, nint methodInfo)
+    {
+        AsyncInputPlugin? plugin = _plugin;
+        bool handled = false;
+        if (_inputHookMode == InputHookMode.OfficialProcessKeyInputs && plugin != null)
+        {
+            try
+            {
+                handled = plugin.UpdateOfficialClock(fixDivider);
+            }
+            catch (Exception exception)
+            {
+                Logger.Error(LogTag, $"Official offset update failed: {exception}");
+            }
+        }
+
+        if (!handled)
+            AsyncInputUtilsUpdateOffsetTimeOriginal(fixDivider, methodInfo);
+    }
+
+    /// <summary>
+    /// 稳定的官方消费驱动。目标 Android 版本的 UpdateInput 是 4 字节 ret，不能
+    /// inline hook；PlayerControl_Update 是完整方法，并且官方原始状态机仍在其后运行。
     /// </summary>
     [UnmanagedHook("Assembly-CSharp.dll", "scrController", "PlayerControl_Update", ParameterCount = 0)]
     private static void PlayerControlUpdate(nint instance, nint methodInfo)
@@ -332,21 +383,17 @@ public static partial class GameHooks
         bool officialFrame = false;
         if (_inputHookMode == InputHookMode.OfficialProcessKeyInputs && plugin != null)
         {
-            Volatile.Write(ref _officialFrameActive, 1);
             try
             {
-                officialFrame = plugin.BeginOfficialAsyncFrame(instance);
+                officialFrame = plugin.BeginOfficialPlayerControlFrame(instance);
             }
             catch (Exception exception)
             {
-                Volatile.Write(ref _officialFrameActive, 0);
-                Logger.Error(LogTag, $"Official async frame failed: {exception}");
+                Logger.Error(LogTag, $"Official PlayerControl frame failed: {exception}");
             }
-
-            if (!officialFrame)
-                Volatile.Write(ref _officialFrameActive, 0);
         }
 
+        Volatile.Write(ref _officialFrameActive, officialFrame ? 1 : 0);
         try
         {
             PlayerControlUpdateOriginal(instance, methodInfo);
@@ -357,22 +404,34 @@ public static partial class GameHooks
             {
                 try
                 {
-                    plugin?.EndOfficialAsyncFrame();
+                    plugin?.RestoreOfficialFrameAngle(instance);
                 }
                 catch (Exception exception)
                 {
-                    Logger.Error(LogTag, $"Official async frame cleanup failed: {exception}");
+                    Logger.Error(LogTag, $"Official frame angle restore failed: {exception}");
+                }
+
+                try
+                {
+                    plugin?.EndOfficialPlayerControlFrame();
+                }
+                catch (Exception exception)
+                {
+                    Logger.Error(LogTag, $"Official PlayerControl cleanup failed: {exception}");
                 }
             }
             Volatile.Write(ref _officialFrameActive, 0);
         }
     }
 
-    /// <summary>在官方 PlayerControl_Update/ProcessKeyInputs 期间让游戏读取 AsyncInput mask。</summary>
+    /// <summary>在官方 PlayerControl_Update 调用期间让游戏读取 AsyncInput mask。</summary>
     [UnmanagedHook("Assembly-CSharp.dll", "AsyncInputManager", "get_isActive", ParameterCount = 0)]
     private static byte AsyncInputIsActive(nint methodInfo)
     {
-        if (Volatile.Read(ref _officialFrameActive) != 0)
+        AsyncInputPlugin? plugin = _plugin;
+        if (!ReplayCompatibility.IsPlaybackActive
+            && (Volatile.Read(ref _officialFrameActive) != 0
+                || plugin?.ShouldReportOfficialActive == true))
             return 1;
         return AsyncInputIsActiveOriginal(methodInfo);
     }

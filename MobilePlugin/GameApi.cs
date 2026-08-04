@@ -85,6 +85,7 @@ internal unsafe sealed class GameApi
     private readonly IRuntimeMethod? _processKeyInputs;
     private readonly IRuntimeMethod? _getChosenPlanet;
     private readonly IRuntimeMethod? _asyncRefreshAngles;
+    private readonly IRuntimeMethod? _updateRefreshAngles;
 
     private IRuntimeMethod? _hashSetAdd;
     private IRuntimeMethod? _hashSetClear;
@@ -97,7 +98,10 @@ internal unsafe sealed class GameApi
     private readonly nint[] _hashSetKeyArgs = new nint[1];
     private readonly nint[] _processTickArgs = new nint[1];
 
-    /// <summary>与游戏 AsyncKeyCode 的 IL2CPP 值类型布局一致，大小为 8 字节。</summary>
+    /// <summary>
+    /// 与游戏 AsyncKeyCode 的 IL2CPP 值类型布局一致，大小为 8 字节。
+    /// Native 参考实现确认第二个 ushort 是对齐/保留槽，label 是 int。
+    /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     private struct AsyncKeyCodeValue
     {
@@ -106,13 +110,24 @@ internal unsafe sealed class GameApi
         public int Label;
     }
 
-    private static readonly int[] AsyncKeyLabels =
+    private static readonly ushort[] AsyncKeyLabels =
     {
         81, 65, 113, 26, 27, 28, 29, 30,
         31, 32, 33, 34, 35, 41, 42, 44,
     };
 
-    private const ushort AsyncKeyRawBase = 0xff00;
+    // AsyncKeyCode(KeyLabel) uses 0xffff. The game's equality operator treats
+    // equal raw keys as equal regardless of label, so additional touch slots
+    // need distinct synthetic raw keys to remain independent in HashSet.
+    private const ushort AsyncTouchRawKey = 0xffff;
+    private const ushort AsyncTouchRawBase = 0xff00;
+
+    private static ushort GetTouchRawKey(int slot)
+    {
+        return slot == 0
+            ? AsyncTouchRawKey
+            : (ushort)(AsyncTouchRawBase + slot);
+    }
 
     /// <summary>旧版本角度回退所需的全部句柄是否齐备。</summary>
     private bool CanUseAngleFallback =>
@@ -253,11 +268,10 @@ internal unsafe sealed class GameApi
         _processKeyInputs = _controllerClass?.GetMethod("ProcessKeyInputs", 1);
         _getChosenPlanet = _controllerClass?.GetMethod("get_chosenPlanet", 0);
         _asyncRefreshAngles = _planetClass.GetMethod("AsyncRefreshAngles", 0);
+        _updateRefreshAngles = _planetClass.GetMethod("Update_RefreshAngles", 0);
     }
 
-    /// <summary>
-    /// 直接读取 Unity 音频系统的高精度 DSP 时钟。
-    /// </summary>
+    /// <summary>直接读取 Unity 音频系统的高精度 DSP 时钟。</summary>
     internal double GetAudioDspTime()
     {
         try
@@ -297,25 +311,20 @@ internal unsafe sealed class GameApi
         }
     }
 
-    /// <summary>
-    /// 获取当前游戏有效的 DSP 时间。
-    /// </summary>
-    /// <remarks>
-    /// 优先读取 Unity AudioSettings.dspTime。只有在目标版本没有暴露该 API 时，
-    /// 才回退到 scrConductor.dspTime + unscaledTime 增量；后者会带有帧缓存延迟。
-    /// </remarks>
+    /// <summary>获取当前游戏有效的 DSP 时间。</summary>
     internal double GetCurrentDspTime(nint conductor)
     {
-        double audioDspTime = GetAudioDspTime();
-        if (audioDspTime > 0d)
-            return audioDspTime;
-
         double dspTime = GetConductorDspTime(conductor);
         double prevFrame = GetConductorPrevFrameTime(conductor);
         double now = GetUnscaledTime();
-        if (dspTime <= 0d || prevFrame <= 0d || now < prevFrame)
+        if (dspTime > 0d)
+        {
+            if (prevFrame > 0d && now >= prevFrame)
+                return dspTime + (now - prevFrame);
             return dspTime;
-        return dspTime + (now - prevFrame);
+        }
+
+        return GetAudioDspTime();
     }
 
 
@@ -563,20 +572,36 @@ internal unsafe sealed class GameApi
 
     // ── 官方 AsyncInput 管线 ───────────────────────────────────
 
+    /// <summary>读取官方 AsyncInputManager 中的帧时钟（兼容旧版本保留）。</summary>
+    internal bool TryGetAsyncFrameTicks(out ulong frameTick, out ulong previousFrameTick)
+    {
+        frameTick = Read(_asyncCurrFrameTick, 0, 0UL);
+        previousFrameTick = Read(_asyncPrevFrameTick, 0, 0UL);
+        return frameTick != 0UL;
+    }
+
     /// <summary>
     /// 写入官方异步输入的帧时钟和 wall-to-DSP 偏移。
+    /// <c>frameTick</c> 来自 realtime，并在 PlayerControl_Update 入口与触摸的
+    /// CLOCK_MONOTONIC 时间轴建立桥接，这样它和 <c>ProcessKeyInputs</c> 使用的是同一域。
     /// </summary>
-    internal bool PrepareAsyncFrame(ulong frameTick, ulong previousFrameTick, out ulong offsetTick)
+    internal bool PrepareAsyncFrame(
+        nint conductor,
+        ulong frameTick,
+        ulong previousFrameTick,
+        out ulong offsetTick)
     {
         offsetTick = 0UL;
-        if (!CanUseOfficialAsyncReplay || frameTick == 0UL)
+        if (!CanUseOfficialAsyncReplay || conductor == 0 || frameTick == 0UL)
             return false;
 
-        // AudioSettings.dspTime 是首选；旧版本没有该属性时，用 conductor 的
-        // 当前值加上 unscaledTime 增量，仍能建立官方 wall-to-DSP 偏移。
+        // Use the audio clock at the same point as the realtime sample. The
+        // conductor field can be one rendered frame old on a low-FPS device.
         double dspTime = GetAudioDspTime();
         if (dspTime <= 0d)
-            dspTime = GetCurrentDspTime(GetConductor());
+            dspTime = GetConductorDspTime(conductor);
+        if (dspTime <= 0d)
+            dspTime = GetCurrentDspTime(conductor);
         if (dspTime <= 0d)
             return false;
 
@@ -616,7 +641,7 @@ internal unsafe sealed class GameApi
     /// <summary>调用游戏自己的官方异步输入入口。</summary>
     internal bool ProcessAsyncInput(nint controller, ulong targetTick)
     {
-        if (_processKeyInputs == null || controller == 0 || targetTick == 0UL)
+        if (_processKeyInputs == null || controller == 0)
             return false;
 
         try
@@ -632,16 +657,17 @@ internal unsafe sealed class GameApi
     }
 
     /// <summary>
-    /// 官方事件可能早于当前渲染帧。事件批处理完成后把选中行星恢复到当前帧，
-    /// 避免低帧率设备在下一次触摸前一直显示在上一个事件时刻。
+    /// 官方状态机返回后重新写入事件时刻的角度。Hit 的末尾会调用普通
+    /// Update_RefreshAngles，把 AsyncInputUtils.AdjustAngle 的结果覆盖成当前帧；
+    /// 因此这里同时调用官方刷新方法，再按官方公式直接回写 angle/cachedAngle，
+    /// 避免出现“判定用了异步时间、小球仍用普通帧时间”的不一致。
     /// </summary>
     internal bool RestoreAsyncAngleToTick(nint controller, ulong targetTick, ulong offsetTick)
     {
         if (!CanUseOfficialAsyncReplay
             || controller == 0
-            || targetTick == 0UL
             || _getChosenPlanet == null
-            || _asyncRefreshAngles == null)
+            || targetTick == 0UL)
         {
             return false;
         }
@@ -653,10 +679,39 @@ internal unsafe sealed class GameApi
             if (planet == 0)
                 return false;
 
-            _asyncRefreshAngles.Invoke(planet);
-            double angle = GetPlanetAngle(planet);
-            Write(_planetCachedAngle, planet, angle);
-            return true;
+            bool refreshed = false;
+            try
+            {
+                if (_asyncRefreshAngles != null)
+                {
+                    _asyncRefreshAngles.Invoke(planet);
+                    refreshed = true;
+                }
+            }
+            catch
+            {
+                // The direct projection below remains the authoritative fallback.
+            }
+
+            try
+            {
+                _updateRefreshAngles?.Invoke(planet);
+            }
+            catch
+            {
+                // Update_RefreshAngles can be absent in older builds.
+            }
+
+            ulong songTick = targetTick >= offsetTick ? targetTick - offsetTick : targetTick;
+            double eventDspTime = songTick / 10_000_000d;
+            double? forcedAngle = ComputeAngle(planet, eventDspTime);
+            if (forcedAngle.HasValue && double.IsFinite(forcedAngle.Value))
+            {
+                SetPlanetAngle(planet, forcedAngle.Value);
+                refreshed = true;
+            }
+
+            return refreshed;
         }
         catch
         {
@@ -693,7 +748,7 @@ internal unsafe sealed class GameApi
             ulong bit = 1UL << slot;
             AsyncKeyCodeValue key = new()
             {
-                Key = (ushort)(AsyncKeyRawBase + slot),
+                Key = GetTouchRawKey(slot),
                 Label = AsyncKeyLabels[slot],
             };
 

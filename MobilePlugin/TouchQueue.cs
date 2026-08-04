@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using StArray.ModManager.Android.Native;
 
 namespace AsyncInput.Mobile;
@@ -8,7 +9,8 @@ namespace AsyncInput.Mobile;
 /// </summary>
 /// <remarks>
 /// 入队发生在 Android 输入分发线程，出队发生在 Unity 主线程。队列只存放值类型快照，
-/// 不持有原生指针或游戏对象。正常输入路径不加锁、不写日志，也不分配托管对象。
+/// 不持有原生指针或游戏对象。正常输入路径不写日志，也不分配托管对象；
+/// 入队前只用一个极短的锁窗口抑制双入口重复广播。
 /// </remarks>
 internal static class TouchQueue
 {
@@ -21,6 +23,13 @@ internal static class TouchQueue
     private static long _receivedCount;
     private static long _droppedCount;
     private static long _staleCount;
+    private static long _duplicateCount;
+    private static readonly object DedupLock = new();
+    private static TouchTimestampInfo _lastEvent;
+    private static long _lastEventDispatchTicks;
+    private static readonly long DuplicateWindowTicks = Math.Max(
+        1L,
+        Stopwatch.Frequency * 8L / 1000L);
 
     /// <summary>当前积压的原始事件数量。</summary>
     internal static int Count => Pending.Count;
@@ -30,6 +39,8 @@ internal static class TouchQueue
     internal static long DroppedCount => Interlocked.Read(ref _droppedCount);
 
     internal static long StaleCount => Interlocked.Read(ref _staleCount);
+
+    internal static long DuplicateCount => Interlocked.Read(ref _duplicateCount);
 
     internal static void Subscribe()
     {
@@ -61,6 +72,11 @@ internal static class TouchQueue
 
     internal static void Clear()
     {
+        lock (DedupLock)
+        {
+            _lastEvent = default;
+            _lastEventDispatchTicks = 0L;
+        }
 #if NET6_0_OR_GREATER
         Pending.Clear();
 #else
@@ -175,6 +191,7 @@ internal static class TouchQueue
         Interlocked.Exchange(ref _receivedCount, 0L);
         Interlocked.Exchange(ref _droppedCount, 0L);
         Interlocked.Exchange(ref _staleCount, 0L);
+        Interlocked.Exchange(ref _duplicateCount, 0L);
     }
 
     /// <summary>输入分发线程回调。</summary>
@@ -194,6 +211,23 @@ internal static class TouchQueue
 
         if (info.EventTimeNanos <= 0L)
             return;
+
+        long now = Stopwatch.GetTimestamp();
+        lock (DedupLock)
+        {
+            long elapsed = now - _lastEventDispatchTicks;
+            if (_lastEventDispatchTicks != 0L
+                && elapsed >= 0L
+                && elapsed <= DuplicateWindowTicks
+                && _lastEvent == info)
+            {
+                Interlocked.Increment(ref _duplicateCount);
+                return;
+            }
+
+            _lastEvent = info;
+            _lastEventDispatchTicks = now;
+        }
 
         // 满载时丢弃最旧事件。主线程会通过时间匹配和状态重建避免把后续事件静默错配。
         while (Pending.Count >= Capacity && Pending.TryDequeue(out _))
