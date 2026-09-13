@@ -1,111 +1,64 @@
-# ADOFAI 异步输入 手机版
+# ADOFAI 异步输入（移动端）
 
-把 ADOFAI 官方 Async Input 的事件时间线移植到手机版的独立 Mod。
-
-## 这是什么
-
-PC 版的异步输入并不是「提前读取输入」，而是使用硬件事件时间戳，
-通过 `ProcessKeyInputs(eventTick)` 驱动官方状态机在输入真实发生时更新角度。
-
-手机版没有 SkyHook 原生库，游戏内 `AsyncInputManager.isActive` 默认是 `false`。
-本 Mod 从 ModManager 的 Android 输入广播取得内核时间戳，填充官方六组 AsyncInput mask，
-再由 `scrController.ProcessKeyInputs(eventTick)` 运行原版判定状态机。
-
-目标版本缺少官方字段时，才回退到 `scrPlayer.Hit` 或 `UpdateHoldKeys` 前的角度重算。
-
-判定链路和 hold/multipress/fail 等副作用完全走游戏原有逻辑。
-
-## 效果预期
-
-手机版的判定窗口本就比 PC 宽（`Pure` 0.05s、`Perfect` 0.07s、`Counted` 0.09s）。
-异步输入消除的是输入消费绑定渲染帧造成的延迟和抖动：
-
-- **低帧率或帧率不稳的设备**：提升明显
-- **稳定高帧率设备**：差异有限
-
-这是机制决定的，不是实现问题。
+为 `ADOFAI-3.3.1-2026.08.15` 移植版补齐移动输入生产端的 Mod。
 
 ## 输入链路
 
-输入时间戳由 ModManager 已安装的 `libinput.so` Hook 广播，本 Mod 不重复 Hook 原生输入层。
-Android 输入线程只做值类型快照入队；游戏主线程在
-`scrController.PlayerControl_Update` 中按时间批量消费，
-同一帧可处理多笔事件。
+ModManager 提供 Android 原始触摸事件及其 `CLOCK_MONOTONIC` 时间戳。本 Mod 只负责把
+这些边沿转换为游戏已有的 `SkyHookEvent`，写入游戏自己的异步队列：
 
-官方路径使用 `AsyncInputUtils.UpdateOffsetTime`、
-`scrController.PlayerControl_Update` 和 `AsyncInputManager.get_isActive`。
-目标 Android 版本的 `scrController.UpdateInput` 是短 `ret` stub，不能作为 inline
-Hook；帧 tick 由 realtime 与 AudioSettings.dspTime 在稳定入口重新建立。
-Replay 已移除同目标 Hook，因此两个 Mod 可以同时启用。
-只有官方路径不可用时才安装旧版 `Hit`/`UpdateHoldKeys` 回退 Hook，因此回退模式可能与占用这些
-方法的其他 Mod 冲突；日志会记录最终使用的入口。
+```text
+InputEvents
+  -> OriginalAsyncProducer
+  -> AsyncInputManager.keyQueue
+  -> scrController.UpdateInput（APK 原有实现）
+  -> ProcessKeyInputs / scrPlayer 判定（APK 原有实现）
+```
+
+队列排序、六组异步按键集合、时间点驱动和命中状态机均由 APK 原有代码完成。本 Mod
+不复制消费者、不维护另一套判定状态，也不改写行星角度。移动端没有 SkyHook 原生生产者，
+所以 Mod 只在游戏处于 `PlayerControl` 时临时启用已有的异步输入类型，并绕过缺失原生库的
+逻辑开关；实际 `UpdateInput` 仍由 APK 执行。
+
+触摸坐标继续交给游戏的 UI 排除逻辑检查；菜单、暂停、失去焦点和场景切换时会清空队列。
+如果 APK 的异步队列、事件类型或必要 Hook 不可用，Mod 会停止加载，游戏保留原本的移动端
+触摸路径。
+
+## 效果预期
+
+异步输入消除的是等待渲染帧采样带来的输入时间抖动，低帧率或帧率不稳定时更明显；稳定的
+高帧率设备差异较小。
 
 ## 设置
 
 | 项 | 说明 |
 |---|---|
-| 启用异步输入 | 关闭后完全走游戏原版判定路径 |
-| 附加偏移 (ms) | 正值把事件解释为更早发生，负值把事件解释为更晚发生 |
-| 提升延迟校准精度 | 校准页使用触摸硬件时间戳 |
-| 显示调试信息 | 显示官方入口、事件消费量、队列状态和回退统计 |
+| 启用异步输入 | 关闭后回到游戏原有输入路径 |
+| 附加偏移 (ms) | 正值判定更早，负值判定更晚 |
+| 显示调试信息 | 显示时钟、生产者和队列统计 |
 
 设置保存在 `mods/AsyncInput/settings.json`。
 
 ## 依赖与构建
 
-需要包含 `InputEvents` 广播 API 的 StArray.ModManager（`async-input-api` 分支起）。
-
-需要 .NET 10 SDK：
+需要包含 `InputEvents` 广播 API 的 StArray.ModManager，以及 .NET 10 SDK：
 
 ```bash
 dotnet build MobilePlugin/AsyncInput.csproj -c Release
 python3 package_mod.py
 ```
 
-编译引用放在 `References/`（见该目录下的 README），最终 Mod 包只含 `AsyncInput.dll`。
+编译引用放在 `References/`，最终 Mod 包只包含 `AsyncInput.dll`。
 
-## 安装
+## 验证
 
-将 Zip 解压到手机 ModManager 的 `mods` 目录：
+打开「显示调试信息」后，进入关卡并触摸屏幕：
 
-```text
-mods/
-└── AsyncInput/
-    └── AsyncInput.dll
-```
+1. 原版异步链路显示为已启用。
+2. 「写入原版 queue」随触摸边沿增加。
+3. 生产失败保持为零。
+4. 暂停、重开或返回菜单后，队列和触点状态被清空。
 
-入口由 `IModPlugin` 自动发现，不需要 `Info.json`。
-
-## 验证是否生效
-
-打开「显示调试信息」后：
-
-1. **输入入口**：应显示 `scrController.ProcessKeyInputs (PlayerControl_Update driver)`。
-2. **官方处理帧/消费事件**：游玩时应持续增加；低帧率下单帧可能消费多笔事件。
-3. **Wall 基准**：进入关卡后应显示「已建立」。暂停、恢复、重开后会重新建立。
-4. **队列溢出丢弃**：正常游玩应为 0；非 0 时会主动清空持有状态，避免卡住按键。
-5. 若入口显示 `Hit` 或 `UpdateHoldKeys`，说明当前游戏版本缺少官方 API，正在使用角度回退。
-
-## 实现说明
-
-核心公式取自 PC 版 `AsyncInputUtils`（反汇编自 `Assembly-CSharp.dll`，releaseNumber 141）：
-
-```
-songPosition = (eventTime - dspTimeSong - calibration_i) * pitch - addoffset
-
-angle = snappedLastAngle
-      + (songPosition - player.lastHit) / crotchetAtStart * PI * speed * (isCW ? 1 : -1)
-```
-
-官方 replay 的 event tick 使用 `DateTime` 数量级的 wall tick。
-帧 tick 来自游戏自己的 `DateTime.Now.Ticks`，触摸事件来自 `CLOCK_MONOTONIC`；两者通过
-每帧更新的 `frame tick -> uptime` 夹心锚点换算。优先调用 Android `libc.so` 的
-`CLOCK_MONOTONIC`；运行时无法解析 native 符号时固定回退到同源的 `Stopwatch` 单调时钟，
-避免因 P/Invoke 失败让 wall 基准永远无法建立。检测到系统时钟阶跃时清空队列并等待下一帧重建，
-避免把暂停或锁屏期间的旧事件投影到新歌曲时间轴。
-
-官方六组 mask 分别保存非帧依赖/帧依赖的持有状态，以及两套 Down/Up 边沿；
-`AsyncKeyCode` 按 IL2CPP 的 8 字节布局写入；触点使用稳定 slot，
-不会把多指输入折叠成单个事件。每个事件批次返回后用同一事件 tick 再调用一次
-`AsyncRefreshAngles` 与直接的官方角度公式回写，避免 `Hit` 末尾的普通角度刷新覆盖异步角度；
-原始 PlayerControl_Update 完成后再投影到当前帧。
+`OriginalAsyncClock` 把 Android 单调时间转换为 `SkyHookEvent.GetTimeInTicks()` 使用的
+`DateTime` tick，并保留 Iridium v3 的有用部分：检测大幅 DSP 时间跳变（XRUN）并用 30
+个样本修正持续偏移。音频事件消费仍完全使用 APK 原有逻辑。

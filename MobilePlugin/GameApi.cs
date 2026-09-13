@@ -5,12 +5,13 @@ using StArray.ModManager.RuntimeAbstractions;
 namespace AsyncInput.Mobile;
 
 /// <summary>
-/// 异步输入所需的游戏字段访问 —— 只覆盖角度重算这一条链路，不做多余封装。
+/// 异步输入所需的游戏字段和方法访问。原版异步队列链路与旧版角度回退共用这层反射封装。
 /// </summary>
 internal unsafe sealed class GameApi
 {
     /// <summary>与游戏内 <c>AsyncInputUtils.GetAngle</c> 使用的常量保持一致。</summary>
     private const double Pi = 3.141592653598793d;
+    private const double DspTicksPerSecond = 10_000_000d;
 
     private readonly IRuntimeAssembly _assembly;
 
@@ -18,16 +19,17 @@ internal unsafe sealed class GameApi
     private readonly IRuntimeClass _playerClass;
     private readonly IRuntimeClass _conductorClass;
     private readonly IRuntimeClass _systemClass;
+    private readonly IRuntimeClass? _floorClass;
     private readonly IRuntimeClass? _calibrationClass;
     private readonly IRuntimeClass? _controllerClass;
     private readonly IRuntimeClass? _adoBaseClass;
     private readonly IRuntimeClass? _asyncInputManagerClass;
     private readonly IRuntimeClass? _rdInputClass;
     private readonly IRuntimeClass? _rdInputTypeClass;
+    private readonly IRuntimeClass? _skyHookEventClass;
     private readonly IAppDomain _domain;
 
     private readonly IRuntimeField? _planetAngle;
-    private readonly IRuntimeField? _planetCachedAngle;
     private readonly IRuntimeField? _planetSnappedLastAngle;
     private readonly IRuntimeField? _planetSystem;
     private readonly IRuntimeField? _planetPlayer;
@@ -35,6 +37,9 @@ internal unsafe sealed class GameApi
     private readonly IRuntimeField? _playerLastHit;
     private readonly IRuntimeField? _playerSystem;
     private readonly IRuntimeField? _playerKeyTimes;
+    private readonly IRuntimeField? _playerHoldKeys;
+    private readonly IRuntimeField? _playerMidspinInfiniteMargin;
+    private readonly IRuntimeField? _floorMidSpin;
 
     private readonly IRuntimeField? _conductorInstance;
     private readonly IRuntimeField? _conductorDspTimeSong;
@@ -43,7 +48,6 @@ internal unsafe sealed class GameApi
     private readonly IRuntimeField? _conductorSong;
     private readonly IRuntimeField? _conductorDspTime;
     private readonly IRuntimeField? _conductorPrevFrame;
-    private readonly IRuntimeField? _conductorSongPos;
 
     private readonly IRuntimeField? _systemSpeed;
     private readonly IRuntimeField? _systemIsCW;
@@ -52,12 +56,17 @@ internal unsafe sealed class GameApi
     private readonly IRuntimeField? _controllerPaused;
     private readonly IRuntimeField? _controllerGameWorld;
     private readonly IRuntimeField? _controllerInstance;
+    private readonly IRuntimeField? _controllerCurrentState;
 
     private readonly IRuntimeField? _calibrationAngleRadians;
     private readonly IRuntimeField? _calibrationConductor;
 
+    // The desktop async data structures remain in the mobile assembly, while
+    // the port is missing the producer/consumer connection. These fields let
+    // the mod fill that connection without referencing the IL2CPP game types.
     private readonly IRuntimeField? _asyncCurrFrameTick;
     private readonly IRuntimeField? _asyncPrevFrameTick;
+    private readonly IRuntimeField? _asyncKeyQueue;
     private readonly IRuntimeField? _asyncTargetSongTick;
     private readonly IRuntimeField? _asyncOffsetTick;
     private readonly IRuntimeField? _asyncOffsetTickUpdated;
@@ -80,17 +89,27 @@ internal unsafe sealed class GameApi
     private readonly IRuntimeMethod? _getConductor;
     private readonly IRuntimeMethod? _getConductorInstance;
     private readonly IRuntimeMethod? _getController;
+    private readonly IRuntimeMethod? _getControllerState;
     private readonly IRuntimeMethod? _getPlanetConductor;
+    private readonly IRuntimeMethod? _getPlayerCurrentFloor;
+    private readonly IRuntimeMethod? _getNextTileIsAuto;
+    private readonly IRuntimeMethod? _getPlayerAuto;
     private readonly IRuntimeMethod? _getCalibrationInput;
     private readonly IRuntimeMethod? _getAudioDspTime;
+    private readonly IRuntimeMethod? _getAudioConfiguration;
     private readonly IRuntimeMethod? _getUnscaledTime;
+    private readonly IRuntimeMethod? _getScreenHeight;
     private readonly IRuntimeMethod? _processKeyInputs;
-    private readonly IRuntimeMethod? _getChosenPlanet;
-    private readonly IRuntimeMethod? _asyncRefreshAngles;
-    private readonly IRuntimeMethod? _updateRefreshAngles;
+    private readonly IRuntimeMethod? _isScreenPointInsideUiElements;
+    private readonly IRuntimeMethod? _rdInputGetMain;
+    private readonly IRuntimeMethod? _asyncClearKeys;
 
     private IRuntimeMethod? _hashSetAdd;
     private IRuntimeMethod? _hashSetClear;
+    private IRuntimeMethod? _asyncKeyQueueEnqueue;
+    private IRuntimeMethod? _asyncKeyQueueClear;
+    private readonly nint[] _asyncKeyEventArgs = new nint[1];
+    private readonly nint[] _rdInputStateArgs = new nint[1];
     private nint _asyncKeyMaskObject;
     private nint _asyncKeyDownMaskObject;
     private nint _asyncKeyUpMaskObject;
@@ -99,17 +118,53 @@ internal unsafe sealed class GameApi
     private nint _asyncFrameKeyUpMaskObject;
     private readonly nint[] _hashSetKeyArgs = new nint[1];
     private readonly nint[] _processTickArgs = new nint[1];
+    private readonly nint[] _screenPointArgs = new nint[1];
+    private readonly IRuntimeField? _skyHookEpochTicks;
+    private nint _asyncKeyQueueObject;
 
-    /// <summary>
-    /// 与游戏 AsyncKeyCode 的 IL2CPP 值类型布局一致，大小为 8 字节。
-    /// Native 参考实现确认第二个 ushort 是对齐/保留槽，label 是 int。
-    /// </summary>
+    // ButtonState.WentDown / WentUp in the 3.3.x mobile build. Keep these
+    // local so the mod does not need to reference the IL2CPP game assembly at
+    // compile time.
+    private const int ButtonStateWentDown = 0;
+    private const int ButtonStateWentUp = 2;
+
     [StructLayout(LayoutKind.Sequential)]
     private struct AsyncKeyCodeValue
     {
         public ushort Key;
-        public ushort Padding;
-        public int Label;
+        public ushort Label;
+    }
+
+    /// <summary>
+    /// The mobile build still contains SkyHookEvent. Its managed layout is
+    /// the default sequential layout (24 bytes on arm64), including the
+    /// trailing alignment padding after Key.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SkyHookEventValue
+    {
+        public long TimeSec;
+        public uint TimeSubsecNano;
+        public int Type;
+        public ushort Label;
+        public ushort Key;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Vector2Value
+    {
+        public float X;
+        public float Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct AudioConfigurationValue
+    {
+        public int SpeakerMode;
+        public int DspBufferSize;
+        public int SampleRate;
+        public int NumRealVoices;
+        public int NumVirtualVoices;
     }
 
     private static readonly ushort[] AsyncKeyLabels =
@@ -118,27 +173,19 @@ internal unsafe sealed class GameApi
         31, 32, 33, 34, 35, 41, 42, 44,
     };
 
-    // AsyncKeyCode(KeyLabel) uses 0xffff. The game's equality operator treats
-    // equal raw keys as equal regardless of label, so additional touch slots
-    // need distinct synthetic raw keys to remain independent in HashSet.
-    private const ushort AsyncTouchRawKey = 0xffff;
     private const ushort AsyncTouchRawBase = 0xff00;
 
-    private static ushort GetTouchRawKey(int slot)
-    {
-        return slot == 0
-            ? AsyncTouchRawKey
-            : (ushort)(AsyncTouchRawBase + slot);
-    }
-
-    /// <summary>旧版本角度回退所需的全部句柄是否齐备。</summary>
-    private bool CanUseAngleFallback =>
+    /// <summary>角度重算所需的全部句柄是否齐备。任一缺失都必须禁用功能而不是算出错误结果。</summary>
+    internal bool IsUsable =>
         _planetAngle != null
         && _planetSnappedLastAngle != null
         && _planetSystem != null
         && _planetPlayer != null
         && _playerLastHit != null
         && _playerSystem != null
+        && _playerKeyTimes != null
+        && _playerHoldKeys != null
+        && _playerMidspinInfiniteMargin != null
         && _systemChosenPlanet != null
         && _conductorDspTimeSong != null
         && _conductorCrotchetAtStart != null
@@ -146,19 +193,15 @@ internal unsafe sealed class GameApi
         && _systemIsCW != null
         && _conductorDspTime != null
         && _conductorPrevFrame != null
-        && _getUnscaledTime != null;
+        && _getUnscaledTime != null
+        && HasDspClockSource;
 
     /// <summary>
-    /// 至少有一条完整输入路径时插件才可加载。官方 replay 不依赖角度字段，
-    /// 这样字段布局有小幅变化时仍可优先使用游戏自己的判定状态机。
+    /// The mobile bridge can drive the game's timestamp-aware player update
+    /// only when all of its state containers and input types are available.
+    /// This is deliberately separate from the angle-projection fallback.
     /// </summary>
-    internal bool IsUsable => CanUseOfficialAsyncReplay || CanUseAngleFallback;
-
-    /// <summary>
-    /// 官方异步输入管线所需句柄是否存在。
-    /// 该路径把事件直接送入 ProcessKeyInputs；缺失时 GameHooks 会选择角度回退路径。
-    /// </summary>
-    internal bool CanUseOfficialAsyncReplay =>
+    internal bool CanUseMobileAsyncBridge =>
         _asyncInputManagerClass != null
         && _processKeyInputs != null
         && _asyncCurrFrameTick != null
@@ -180,8 +223,32 @@ internal unsafe sealed class GameApi
         && _rdInputAsyncKeyboardLeft != null
         && _rdInputAsyncKeyboardRight != null
         && _rdInputTypeActive != null
-        && _getChosenPlanet != null
-        && _asyncRefreshAngles != null;
+        && _controllerGameWorld != null
+        && _getController != null
+        && _isScreenPointInsideUiElements != null;
+
+    /// <summary>
+    /// The minimum runtime surface needed to feed the game's own
+    /// AsyncInputManager queue. This intentionally does not require the
+    /// custom angle bridge's UI/reflection helpers.
+    /// </summary>
+    internal bool CanUseOriginalAsyncChain =>
+        _asyncInputManagerClass != null
+        && _asyncKeyQueue != null
+        && _asyncClearKeys != null
+        && _asyncCurrFrameTick != null
+        && _asyncPrevFrameTick != null
+        && _asyncOffsetTick != null
+        && _asyncOffsetTickUpdated != null
+        && _rdInputKeyboardInput != null
+        && _rdInputKeyboardLeft != null
+        && _rdInputKeyboardRight != null
+        && _rdInputAsyncKeyboard != null
+        && _rdInputAsyncKeyboardLeft != null
+        && _rdInputAsyncKeyboardRight != null
+        && _rdInputTypeActive != null
+        && (_controllerCurrentState != null || _getControllerState != null)
+        && _rdInputGetMain != null;
 
     /// <summary>延迟校准页能否按硬件时间戳重算采样角度。</summary>
     internal bool CanAdjustCalibration =>
@@ -191,7 +258,17 @@ internal unsafe sealed class GameApi
         && _conductorCrotchetAtStart != null
         && _conductorDspTime != null
         && _conductorPrevFrame != null
-        && _getUnscaledTime != null;
+        && _getUnscaledTime != null
+        && HasDspClockSource;
+
+    /// <summary>
+    /// 优先使用 Unity 的音频 DSP 时钟；旧版导出若没有暴露 AudioSettings，
+    /// 可用游戏每帧维护的 conductor.dspTime 加 unscaledTime 外推。
+    /// </summary>
+    private bool HasDspClockSource => _getAudioDspTime != null
+                                      || (_conductorDspTime != null
+                                          && _conductorPrevFrame != null
+                                          && _getUnscaledTime != null);
 
     private GameApi(IAppDomain domain, IRuntimeAssembly assembly)
     {
@@ -202,15 +279,16 @@ internal unsafe sealed class GameApi
         _playerClass = RequireClass("scrPlayer");
         _conductorClass = RequireClass("scrConductor");
         _systemClass = RequireClass("PlanetarySystem");
+        _floorClass = FindClass("scrFloor");
         _calibrationClass = FindClass("scnCalibration");
         _controllerClass = FindClass("scrController");
         _adoBaseClass = FindClass("ADOBase");
         _asyncInputManagerClass = FindClass("AsyncInputManager");
         _rdInputClass = FindClass("RDInput");
         _rdInputTypeClass = FindClass("RDInputType");
+        _skyHookEventClass = FindClassInDomain("SkyHook", "SkyHookEvent");
 
         _planetAngle = FindField(_planetClass, "angle");
-        _planetCachedAngle = FindField(_planetClass, "cachedAngle");
         _planetSnappedLastAngle = FindField(_planetClass, "<snappedLastAngle>k__BackingField", "snappedLastAngle");
         _planetSystem = FindField(_planetClass, "planetarySystem");
         _planetPlayer = FindField(_planetClass, "player");
@@ -218,6 +296,9 @@ internal unsafe sealed class GameApi
         _playerLastHit = FindField(_playerClass, "lastHit");
         _playerSystem = FindField(_playerClass, "planetarySystem");
         _playerKeyTimes = FindField(_playerClass, "keyTimes");
+        _playerHoldKeys = FindField(_playerClass, "holdKeys");
+        _playerMidspinInfiniteMargin = FindField(_playerClass, "midspinInfiniteMargin");
+        _floorMidSpin = FindField(_floorClass, "midSpin");
 
         _conductorInstance = FindField(_conductorClass, "_instance", "instance");
         _conductorDspTimeSong = FindField(_conductorClass, "dspTimeSong");
@@ -226,7 +307,6 @@ internal unsafe sealed class GameApi
         _conductorSong = FindField(_conductorClass, "song");
         _conductorDspTime = FindField(_conductorClass, "dspTime");
         _conductorPrevFrame = FindField(_conductorClass, "previousFrameTime");
-        _conductorSongPos = FindField(_conductorClass, "_songposition_minusi", "songposition_minusi");
 
         _systemSpeed = FindField(_systemClass, "speed");
         _systemIsCW = FindField(_systemClass, "isCW");
@@ -235,12 +315,15 @@ internal unsafe sealed class GameApi
         _controllerPaused = FindField(_controllerClass, "_paused", "paused");
         _controllerGameWorld = FindField(_controllerClass, "gameworld", "isGameWorld", "isgameworld");
         _controllerInstance = FindField(_controllerClass, "_instance", "instance");
+        _controllerCurrentState = FindField(_controllerClass, "currentState");
+        _skyHookEpochTicks = FindField(_skyHookEventClass, "EpochTicks");
 
         _calibrationAngleRadians = FindField(_calibrationClass, "angleRadians");
         _calibrationConductor = FindField(_calibrationClass, "conductor");
 
         _asyncCurrFrameTick = FindField(_asyncInputManagerClass, "currFrameTick");
         _asyncPrevFrameTick = FindField(_asyncInputManagerClass, "prevFrameTick");
+        _asyncKeyQueue = FindField(_asyncInputManagerClass, "keyQueue");
         _asyncTargetSongTick = FindField(_asyncInputManagerClass, "targetSongTick");
         _asyncOffsetTick = FindField(_asyncInputManagerClass, "offsetTick");
         _asyncOffsetTickUpdated = FindField(_asyncInputManagerClass, "offsetTickUpdated");
@@ -264,24 +347,64 @@ internal unsafe sealed class GameApi
         _getConductorInstance = _conductorClass.GetMethod("get_instance", 0);
         _getController = _adoBaseClass?.GetMethod("get_controller", 0)
             ?? _controllerClass?.GetMethod("get_instance", 0);
+        _getControllerState = _controllerClass?.GetMethod("get_state", 0);
         _getPlanetConductor = _planetClass.GetMethod("get_conductor", 0);
+        _getPlayerCurrentFloor = _playerClass.GetMethod("get_currFloor", 0);
+        _getNextTileIsAuto = _playerClass.GetMethod("get__nextTileIsAuto", 0);
+        _getPlayerAuto = _playerClass.GetMethod("get_auto", 0);
         _getCalibrationInput = _conductorClass.GetMethod("get_calibration_i", 0);
         _getAudioDspTime = FindClassInDomain("UnityEngine", "AudioSettings")
             ?.GetMethod("get_dspTime", 0);
+        _getAudioConfiguration = FindClassInDomain("UnityEngine", "AudioSettings")
+            ?.GetMethod("GetConfiguration", 0);
         _getUnscaledTime = FindClassInDomain("UnityEngine", "Time")
             ?.GetMethod("get_unscaledTimeAsDouble", 0);
+        _getScreenHeight = FindClassInDomain("UnityEngine", "Screen")
+            ?.GetMethod("get_height", 0);
         _processKeyInputs = _controllerClass?.GetMethod("ProcessKeyInputs", 1);
-        _getChosenPlanet = _controllerClass?.GetMethod("get_chosenPlanet", 0);
-        _asyncRefreshAngles = _planetClass.GetMethod("AsyncRefreshAngles", 0);
-        _updateRefreshAngles = _planetClass.GetMethod("Update_RefreshAngles", 0);
+        _rdInputGetMain = _rdInputClass?.GetMethod("GetMain", 1);
+        _asyncClearKeys = _asyncInputManagerClass?.GetMethod("ClearKeys", 0);
+        _isScreenPointInsideUiElements = _controllerClass?.GetMethod(
+            "IsScreenPointInsideUIElements",
+            1);
     }
 
-    /// <summary>直接读取 Unity 音频系统的高精度 DSP 时钟。</summary>
+    /// <summary>
+    /// 直接读取 Unity 音频系统的高精度 DSP 时钟。
+    /// </summary>
     internal double GetAudioDspTime()
     {
         try
         {
             return _getAudioDspTime?.InvokeStaticUnbox<double>() ?? 0d;
+        }
+        catch
+        {
+            return 0d;
+        }
+    }
+
+    /// <summary>
+    /// Returns the same audio-buffer duration used by Iridium's
+    /// <c>SafeDSPTime.GetAuidoPrecise</c>. Invalid/stripped configurations
+    /// return zero so the caller can use its conservative fallback threshold.
+    /// </summary>
+    internal double GetAudioBufferDuration()
+    {
+        if (_getAudioConfiguration == null)
+            return 0d;
+
+        try
+        {
+            AudioConfigurationValue configuration =
+                _getAudioConfiguration.InvokeStaticUnbox<AudioConfigurationValue>();
+            if (configuration.DspBufferSize <= 0 || configuration.SampleRate <= 0)
+                return 0d;
+
+            double duration = configuration.DspBufferSize / (double)configuration.SampleRate;
+            return double.IsFinite(duration) && duration > 0d && duration < 1d
+                ? duration
+                : 0d;
         }
         catch
         {
@@ -316,20 +439,22 @@ internal unsafe sealed class GameApi
         }
     }
 
-    /// <summary>获取当前游戏有效的 DSP 时间。</summary>
+    /// <summary>
+    /// 获取当前游戏有效的 DSP 时间，补偿帧采样滞后。
+    /// </summary>
+    /// <remarks>
+    /// scrConductor.dspTime 每帧边界更新，判定发生在帧中间，
+    /// 此刻 dspTime 已过时 (unscaledTime - previousFrameTime) 秒。
+    /// 补回后等效于在判定当刻直接读取游戏时钟，消除半帧系统偏差。
+    /// </remarks>
     internal double GetCurrentDspTime(nint conductor)
     {
         double dspTime = GetConductorDspTime(conductor);
         double prevFrame = GetConductorPrevFrameTime(conductor);
         double now = GetUnscaledTime();
-        if (dspTime > 0d)
-        {
-            if (prevFrame > 0d && now >= prevFrame)
-                return dspTime + (now - prevFrame);
+        if (dspTime <= 0d || prevFrame <= 0d || now < prevFrame)
             return dspTime;
-        }
-
-        return GetAudioDspTime();
+        return dspTime + (now - prevFrame);
     }
 
 
@@ -376,15 +501,46 @@ internal unsafe sealed class GameApi
         if (_planetPlayer == null) missing.Add("scrPlanet.player");
         if (_playerLastHit == null) missing.Add("scrPlayer.lastHit");
         if (_playerSystem == null) missing.Add("scrPlayer.planetarySystem");
+        if (_playerKeyTimes == null) missing.Add("scrPlayer.keyTimes");
+        if (_playerHoldKeys == null) missing.Add("scrPlayer.holdKeys");
+        if (_playerMidspinInfiniteMargin == null) missing.Add("scrPlayer.midspinInfiniteMargin");
         if (_systemChosenPlanet == null) missing.Add("PlanetarySystem.chosenPlanet");
         if (_conductorDspTimeSong == null) missing.Add("scrConductor.dspTimeSong");
         if (_conductorCrotchetAtStart == null) missing.Add("scrConductor.crotchetAtStart");
         if (_systemSpeed == null) missing.Add("PlanetarySystem.speed");
         if (_systemIsCW == null) missing.Add("PlanetarySystem.isCW");
-        if (_getAudioDspTime == null) missing.Add("UnityEngine.AudioSettings.dspTime");
+        if (!HasDspClockSource)
+            missing.Add("UnityEngine.AudioSettings.dspTime or conductor clock");
         if (_conductorDspTime == null) missing.Add("scrConductor.dspTime");
         if (_conductorPrevFrame == null) missing.Add("scrConductor.previousFrameTime");
         if (_getUnscaledTime == null) missing.Add("UnityEngine.Time.unscaledTimeAsDouble");
+        return missing.Count == 0 ? "none" : string.Join(", ", missing);
+    }
+
+    /// <summary>列出原版异步消费者链路缺失的运行时对象/字段。</summary>
+    internal string DescribeOriginalAsyncMissing()
+    {
+        List<string> missing = new();
+        if (_asyncInputManagerClass == null) missing.Add("AsyncInputManager");
+        if (_asyncKeyQueue == null) missing.Add("AsyncInputManager.keyQueue");
+        if (_asyncClearKeys == null) missing.Add("AsyncInputManager.ClearKeys");
+        if (_asyncKeyQueueObject == 0) missing.Add("keyQueue instance");
+        if (_asyncKeyQueueEnqueue == null) missing.Add("keyQueue.Enqueue");
+        if (_asyncKeyQueueClear == null) missing.Add("keyQueue.Clear");
+        if (_asyncCurrFrameTick == null) missing.Add("AsyncInputManager.currFrameTick");
+        if (_asyncOffsetTick == null) missing.Add("AsyncInputManager.offsetTick");
+        if (_asyncOffsetTickUpdated == null) missing.Add("AsyncInputManager.offsetTickUpdated");
+        if (_controllerCurrentState == null && _getControllerState == null)
+            missing.Add("scrController.state/currentState");
+        if (_rdInputGetMain == null) missing.Add("RDInput.GetMain");
+        if (_rdInputKeyboardInput == null) missing.Add("RDInput.keyboardInput");
+        if (_rdInputKeyboardLeft == null) missing.Add("RDInput.keyboardLeft");
+        if (_rdInputKeyboardRight == null) missing.Add("RDInput.keyboardRight");
+        if (_rdInputAsyncKeyboard == null) missing.Add("RDInput.asyncKeyboard");
+        if (_rdInputAsyncKeyboardLeft == null) missing.Add("RDInput.asyncKeyboardLeft");
+        if (_rdInputAsyncKeyboardRight == null) missing.Add("RDInput.asyncKeyboardRight");
+        if (_rdInputTypeActive == null) missing.Add("RDInputType._isActive");
+        if (_skyHookEventClass == null) missing.Add("SkyHook.SkyHookEvent");
         return missing.Count == 0 ? "none" : string.Join(", ", missing);
     }
 
@@ -402,10 +558,11 @@ internal unsafe sealed class GameApi
     internal nint GetController()
     {
         nint controller = InvokeStaticObject(_getController);
-        if (controller != 0)
-            return controller;
-        return Read(_controllerInstance, 0, nint.Zero);
+        return controller != 0 ? controller : Read(_controllerInstance, 0, nint.Zero);
     }
+
+    internal bool IsGameplayController(nint controller)
+        => controller != 0 && Read(_controllerGameWorld, controller, (byte)0) != 0;
 
     internal nint GetPlanetConductor(nint planet)
     {
@@ -494,26 +651,17 @@ internal unsafe sealed class GameApi
     }
 
     /// <summary>
-    /// 读取当前待处理输入的第一个 Unity 时间。
-    /// 用于在角度回退路径中把硬件事件与游戏这一笔 keyTimes 对齐。
+    /// 当前是否处于长按状态。游戏用 <c>holdKeys</c> 保存已命中的持有键；它非空时，
+    /// <c>ValidInputWasReleased</c> 才会把触摸抬起解释为长按释放。
     /// </summary>
-    internal bool TryGetFirstPendingKeyTime(nint player, out double keyTime)
+    internal bool IsHolding(nint player)
     {
-        keyTime = 0d;
-        nint keyTimes = Read(_playerKeyTimes, player, nint.Zero);
-        if (keyTimes == 0)
+        nint holdKeys = Read(_playerHoldKeys, player, nint.Zero);
+        if (holdKeys == 0)
             return false;
-
         try
         {
-            int count = new RuntimeObject(keyTimes).InvokeUnbox<int>("get_Count", 0);
-            if (count <= 0)
-                return false;
-
-            int index = 0;
-            nint[] args = { (nint)(&index) };
-            keyTime = new RuntimeObject(keyTimes).InvokeUnbox<double>("get_Item", 1, args);
-            return double.IsFinite(keyTime);
+            return new RuntimeObject(holdKeys).InvokeUnbox<int>("get_Count", 0) > 0;
         }
         catch
         {
@@ -522,45 +670,43 @@ internal unsafe sealed class GameApi
     }
 
     /// <summary>
-    /// 当前歌曲位置（已扣除校准偏移），对应 <c>scrConductor.songposition_minusi</c>。
+    /// 当前帧是否可能触发 midspin 的第二次合成判定。
     /// </summary>
-    internal double GetSongPositionMinusI(nint conductor)
+    internal bool HasMidspinInfiniteMargin(nint player)
+        => Read(_playerMidspinInfiniteMargin, player, (byte)0) != 0;
+
+    /// <summary>
+    /// 当前砖块是否会在一次成功命中后插入 midspin 合成输入。
+    /// 该信息只用于防止同帧多次真实输入被合成项重新排序，不参与判定本身。
+    /// </summary>
+    internal bool IsCurrentFloorMidSpin(nint player)
     {
-        double value = Read(_conductorSongPos, conductor, 0d);
-        if (value > 0d)
-            return value;
-        // private 字段可能读不到，尝试属性 getter
+        if (player == 0 || _getPlayerCurrentFloor == null)
+            return false;
         try
         {
-            nint obj = conductor;
-            if (obj != 0)
-                return new RuntimeObject(obj).InvokeUnbox<double>("get_songposition_minusi", 0);
+            nint floor = _getPlayerCurrentFloor.Invoke(player);
+            return floor != 0 && Read(_floorMidSpin, floor, (byte)0) != 0;
         }
-        catch { }
-        return 0d;
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
-    /// 向 <c>scrPlayer.keyTimes</c> 推入一个按键时刻，等价于
-    /// <c>keyTimes.Add(time)</c>——即 <c>HitAutoFloors</c> 内部做的事。
+    /// 自动输入会使用游戏自己的自动分支，不能把手指 Down 当作普通命中去重算角度。
     /// </summary>
-    internal void AddKeyTime(nint player, double time)
+    internal bool IsAutoInputPath(nint player)
     {
-        nint keyTimes = Read(_playerKeyTimes, player, nint.Zero);
-        if (keyTimes == 0)
-            return;
         try
         {
-            // List<double>.Add(double) —— 参数是装箱的 double。
-            // il2cpp_runtime_invoke 要求参数为指向已装箱值的指针。
-            // double 是 8 字节，先把它放进一个 long 槽里再传地址。
-            long boxed = BitConverter.DoubleToInt64Bits(time);
-            nint[] args = { (nint)boxed };
-            new RuntimeObject(keyTimes).InvokeVoid("Add", 1, args);
+            return (_getPlayerAuto?.InvokeUnbox<byte>(player) ?? 0) != 0
+                || (_getNextTileIsAuto?.InvokeUnbox<byte>(player) ?? 0) != 0;
         }
-        catch (Exception ex)
+        catch
         {
-            Logger.Warn("AsyncInput", $"AddKeyTime failed: {ex.Message}");
+            return false;
         }
     }
 
@@ -573,103 +719,400 @@ internal unsafe sealed class GameApi
     internal bool IsPaused(nint controller) => Read(_controllerPaused, controller, (byte)0) != 0;
 
     /// <summary>
-    /// 判断控制器是否仍处于游戏世界。字段不存在时保守地交给上层 capture gate 判断。
+    /// 仅在原版判定窗口开始前投影 <c>angle</c>。
     /// </summary>
-    internal bool IsGameplayController(nint controller)
+    /// <remarks>
+    /// 官方 <c>scrPlanet.AsyncRefreshAngles</c> 也只写这个字段。随后真正进入
+    /// <c>scrPlayer.Hit</c> 时，游戏会自行把 <c>angle</c> 复制给 <c>cachedAngle</c>；
+    /// 提前写 cachedAngle 会让未实际调用 Hit 的分支也携带一笔伪判定状态。
+    /// </remarks>
+    internal void SetPlanetAngleForJudgment(nint planet, double angle)
+    {
+        Write(_planetAngle, planet, angle);
+    }
+
+    /// <summary>
+    /// 撤销一笔未被原版刷新覆盖的临时判定投影。
+    /// </summary>
+    /// <remarks>
+    /// 若原版已在命中、切砖或其他状态转移中改写角度，则不能回写旧帧角度。
+    /// 因此只在字段仍等于本 Mod 写入的投影值时恢复。cachedAngle 刻意不碰：
+    /// 它若被 Hit 写入，就应保留这次真实判定所使用的角度。
+    /// </remarks>
+    internal bool RestorePlanetAngleIfUnchanged(
+        nint planet,
+        double projectedAngle,
+        double frameAngle)
+    {
+        if (planet == 0 || !double.IsFinite(projectedAngle) || !double.IsFinite(frameAngle))
+            return false;
+
+        double currentAngle = GetPlanetAngle(planet);
+        // All values originate from the same formula/field write. A tiny
+        // relative tolerance admits only floating-point roundoff, not normal
+        // gameplay movement between the projection and this restoration.
+        double tolerance = Math.Max(1d, Math.Abs(projectedAngle)) * 1e-10d;
+        if (Math.Abs(currentAngle - projectedAngle) > tolerance)
+            return false;
+
+        Write(_planetAngle, planet, frameAngle);
+        return true;
+    }
+
+    // ── Original mobile-to-AsyncInputManager chain ───────────────────────
+
+    private const long UnixEpochTicks = 621355968000000000L;
+    private const int PlayerControlState = 4;
+    // Keep every synthetic pointer distinguishable to AsyncKeyCode. Its
+    // equality operator treats two different raw keys with the same label as
+    // equal, so a shared Space label would collapse simultaneous touches.
+
+    /// <summary>
+    /// Resolves the actual runtime instance of
+    /// <c>ConcurrentQueue&lt;SkyHookEvent&gt;</c> and its closed generic methods.
+    /// The queue is a static field, so no managed mirror is needed.
+    /// </summary>
+    internal bool InitializeOriginalAsyncQueue()
+    {
+        if (!CanUseOriginalAsyncChain)
+            return false;
+        return EnsureOriginalAsyncQueueApi();
+    }
+
+    /// <summary>
+    /// Enqueues one value into the game's own SkyHook event queue. The caller
+    /// supplies the timestamp in the same DateTime tick domain as
+    /// <c>AsyncInputManager.currFrameTick</c>; this method only serializes it
+    /// into the already loaded <c>SkyHookEvent</c> value type.
+    /// </summary>
+    internal bool EnqueueOriginalAsyncEvent(
+        long dateTimeTicks,
+        bool pressed,
+        int slot)
+    {
+        if (dateTimeTicks <= 0L || slot < 0 || slot >= 16
+            || !EnsureOriginalAsyncQueueApi())
+        {
+            return false;
+        }
+
+        long epochTicks = Read(_skyHookEpochTicks, 0, UnixEpochTicks);
+        if (epochTicks <= 0L)
+            epochTicks = UnixEpochTicks;
+
+        long relativeTicks;
+        try
+        {
+            relativeTicks = checked(dateTimeTicks - epochTicks);
+        }
+        catch
+        {
+            return false;
+        }
+
+        long seconds = Math.DivRem(relativeTicks, TimeSpan.TicksPerSecond, out long remainder);
+        if (remainder < 0L)
+        {
+            seconds--;
+            remainder += TimeSpan.TicksPerSecond;
+        }
+
+        uint subsecNano;
+        try
+        {
+            subsecNano = checked((uint)(remainder * 100L));
+        }
+        catch
+        {
+            return false;
+        }
+
+        SkyHookEventValue value = new()
+        {
+            TimeSec = seconds,
+            TimeSubsecNano = subsecNano,
+            // SkyHook.EventType.KeyPressed = 0, KeyReleased = 1.
+            Type = pressed ? 0 : 1,
+            // All labels are accepted by the full async keyboard source. The
+            // per-slot label/raw-key pair keeps simultaneous pointers distinct.
+            Label = AsyncKeyLabels[slot],
+            Key = GetTouchRawKey(slot),
+        };
+
+        try
+        {
+            _asyncKeyEventArgs[0] = (nint)(&value);
+            _asyncKeyQueueEnqueue!.Invoke(_asyncKeyQueueObject, _asyncKeyEventArgs);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>清空游戏原生异步输入状态，只用于会话边界或故障复位。</summary>
+    internal void ClearOriginalAsyncInputState()
+    {
+        try
+        {
+            _asyncClearKeys?.InvokeStatic();
+        }
+        catch
+        {
+            // Continue with the individual containers below when available.
+        }
+
+        if (EnsureAsyncMaskApi())
+        {
+            ClearHashSet(_asyncKeyMaskObject);
+            ClearHashSet(_asyncKeyDownMaskObject);
+            ClearHashSet(_asyncKeyUpMaskObject);
+            ClearHashSet(_asyncFrameKeyMaskObject);
+            ClearHashSet(_asyncFrameKeyDownMaskObject);
+            ClearHashSet(_asyncFrameKeyUpMaskObject);
+        }
+    }
+
+    /// <summary>
+    /// Enables the full async source for gameplay and restores the normal
+    /// keyboard source elsewhere. Touch events use Space, which deliberately
+    /// keeps the left/right async controller variants from counting them a
+    /// second time.
+    /// </summary>
+    internal bool SetOriginalAsyncInputTypes(bool gameplay)
+    {
+        if (_rdInputTypeActive == null
+            || _rdInputKeyboardInput == null
+            || _rdInputKeyboardLeft == null
+            || _rdInputKeyboardRight == null
+            || _rdInputAsyncKeyboard == null
+            || _rdInputAsyncKeyboardLeft == null
+            || _rdInputAsyncKeyboardRight == null)
+        {
+            return false;
+        }
+
+        bool ok = true;
+        ok &= SetInputTypeActive(_rdInputKeyboardInput, !gameplay);
+        ok &= SetInputTypeActive(_rdInputKeyboardLeft, !gameplay);
+        ok &= SetInputTypeActive(_rdInputKeyboardRight, !gameplay);
+        ok &= SetInputTypeActive(_rdInputAsyncKeyboard, gameplay);
+        ok &= SetInputTypeActive(_rdInputAsyncKeyboardLeft, gameplay);
+        ok &= SetInputTypeActive(_rdInputAsyncKeyboardRight, gameplay);
+        return ok;
+    }
+
+    // Kept as a compatibility alias for the older, now-disabled bridge code.
+    internal bool SetMobileAsyncInputTypes(bool enabled)
+        => SetOriginalAsyncInputTypes(enabled);
+
+    /// <summary>读取原版 RDInput 的 WentDown 计数，不复制其 input mask。</summary>
+    internal int GetOriginalAsyncPressCount()
+    {
+        if (_rdInputGetMain == null)
+            return 0;
+
+        try
+        {
+            int state = ButtonStateWentDown;
+            _rdInputStateArgs[0] = (nint)(&state);
+            return Math.Max(0, _rdInputGetMain.InvokeStaticUnbox<int>(_rdInputStateArgs));
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    internal int GetControllerState(nint controller)
     {
         if (controller == 0)
+            return -1;
+
+        if (_getControllerState != null)
+        {
+            try
+            {
+                return _getControllerState.InvokeUnbox<int>(controller);
+            }
+            catch
+            {
+                // Fall back to the public mirror field used by this APK.
+            }
+        }
+
+        return Read(_controllerCurrentState, controller, -1);
+    }
+
+    internal bool IsPlayerControlState(nint controller)
+        => controller != 0 && GetControllerState(controller) == PlayerControlState;
+
+    internal bool SetOriginalAsyncCurrentFrameTick(ulong tick)
+    {
+        if (_asyncCurrFrameTick == null || tick == 0UL)
             return false;
-        return _controllerGameWorld == null
-            || Read(_controllerGameWorld, controller, (byte)0) != 0;
+        Write(_asyncCurrFrameTick, 0, tick);
+        return true;
+    }
+
+    internal ulong GetOriginalAsyncCurrentFrameTick()
+        => Read(_asyncCurrFrameTick, 0, 0UL);
+
+    internal ulong GetOriginalAsyncOffsetTick()
+        => Read(_asyncOffsetTick, 0, 0UL);
+
+    internal void SetOriginalAsyncOffsetTick(ulong offsetTick)
+    {
+        Write(_asyncOffsetTick, 0, offsetTick);
+        Write(_asyncOffsetTickUpdated, 0, (byte)1);
     }
 
     /// <summary>
-    /// 官方异步路径的启动条件。只用控制器所在的 gameworld 和暂停状态，不能把
-    /// currentState 写死成某个枚举值：移动版在倒计时、重开和自定义关卡切换时会
-    /// 短暂使用不同状态，但仍需要先让 scrConductor 建立官方帧时钟。
+    /// Measures the offset using the same conductor DSP field read by the
+    /// APK's original AsyncInputUtils.UpdateOffsetTime. Falling back to
+    /// AudioSettings is only for an export where that conductor field is not
+    /// readable; mixing the two clocks during normal gameplay causes offset
+    /// steps and apparent lost inputs at the edge of the judgement window.
     /// </summary>
-    internal bool IsOfficialInputContext()
+    internal bool TryGetOriginalAsyncOffset(out ulong measuredOffset)
     {
-        nint controller = GetController();
-        return controller != 0
-            && !IsPaused(controller)
-            && IsGameplayController(controller);
+        measuredOffset = 0UL;
+        ulong frameTick = GetOriginalAsyncCurrentFrameTick();
+        if (frameTick == 0UL)
+            return false;
+
+        nint conductor = GetConductor();
+        double dspTime = GetConductorDspTime(conductor);
+        if (!double.IsFinite(dspTime) || dspTime <= 0d)
+            dspTime = GetAudioDspTime();
+
+        double dspTicks = dspTime * DspTicksPerSecond;
+        if (!double.IsFinite(dspTicks)
+            || dspTicks <= 0d
+            || dspTicks >= ulong.MaxValue)
+        {
+            return false;
+        }
+
+        ulong dspTick = (ulong)dspTicks;
+        if (frameTick <= dspTick)
+            return false;
+
+        measuredOffset = frameTick - dspTick;
+        return true;
     }
 
-    // ── 官方 AsyncInput 管线 ───────────────────────────────────
-
-    /// <summary>读取官方 AsyncInputManager 中的帧时钟（兼容旧版本保留）。</summary>
-    internal bool TryGetAsyncFrameTicks(out ulong frameTick, out ulong previousFrameTick)
+    private bool EnsureOriginalAsyncQueueApi()
     {
-        frameTick = Read(_asyncCurrFrameTick, 0, 0UL);
-        previousFrameTick = Read(_asyncPrevFrameTick, 0, 0UL);
-        return frameTick != 0UL;
+        if (_asyncKeyQueueObject != 0
+            && _asyncKeyQueueEnqueue != null
+            && _asyncKeyQueueClear != null)
+        {
+            return true;
+        }
+
+        _asyncKeyQueueObject = Read(_asyncKeyQueue, 0, nint.Zero);
+        if (_asyncKeyQueueObject == 0)
+            return false;
+
+        IRuntimeClass? queueClass = RuntimeManager.GetObjectClass(_asyncKeyQueueObject);
+        _asyncKeyQueueEnqueue = queueClass?.GetMethod("Enqueue", 1);
+        _asyncKeyQueueClear = queueClass?.GetMethod("Clear", 0);
+        return _asyncKeyQueueEnqueue != null && _asyncKeyQueueClear != null;
     }
+
+    // ── Mobile async bridge ───────────────────────────────────
 
     /// <summary>
-    /// 写入官方异步输入的帧时钟和 wall-to-DSP 偏移。
-    /// <c>frameTick</c> 来自 realtime，并在 PlayerControl_Update 入口与触摸的
-    /// CLOCK_MONOTONIC 时间轴建立桥接，这样它和 <c>ProcessKeyInputs</c> 使用的是同一域。
+    /// Establishes the bridge's wall-tick to DSP-tick conversion for the
+    /// current conductor frame. The stock <c>UpdateOffsetTime(100)</c> eases
+    /// toward a newly enabled producer over many frames; that is fine when
+    /// SkyHook has been active continuously, but it makes a newly supplied
+    /// mobile producer decode ordinary no-edge frames at a wrong song time.
+    /// The direct bridge owns this producer window, so use the same current
+    /// frame values to establish its offset atomically before judgment.
     /// </summary>
-    internal bool PrepareAsyncFrame(
+    internal bool SynchronizeMobileAsyncFrame(
         nint conductor,
-        ulong frameTick,
-        ulong previousFrameTick,
+        out ulong frameTick,
         out ulong offsetTick)
     {
+        frameTick = Read(_asyncCurrFrameTick, 0, 0UL);
         offsetTick = 0UL;
-        if (!CanUseOfficialAsyncReplay || conductor == 0 || frameTick == 0UL)
+        if (conductor == 0 || frameTick == 0UL)
             return false;
 
-        // Match AsyncInputUtils.UpdateOffsetTime: it uses scrConductor.dspTime,
-        // which was sampled at the start of the same conductor frame. Reading
-        // AudioSettings first can pair a newer audio sample with an older wall
-        // tick on low-FPS devices and introduce a systematic early/late shift.
         double dspTime = GetConductorDspTime(conductor);
-        if (dspTime <= 0d)
-            dspTime = GetAudioDspTime();
-        if (dspTime <= 0d)
-            dspTime = GetCurrentDspTime(conductor);
-        if (dspTime <= 0d)
+        double dspTicks = dspTime * DspTicksPerSecond;
+        if (!double.IsFinite(dspTicks)
+            || dspTicks <= 0d
+            || dspTicks >= ulong.MaxValue)
+        {
+            return false;
+        }
+
+        // AsyncInputUtils.UpdateOffsetTime uses IL conv.u8 for the positive
+        // DSP timeline, so this is truncation rather than rounding.
+        ulong dspTick = (ulong)dspTicks;
+        if (frameTick <= dspTick)
             return false;
 
-        double dspTicksDouble = dspTime * 10_000_000d;
-        if (!double.IsFinite(dspTicksDouble) || dspTicksDouble <= 0d || dspTicksDouble >= ulong.MaxValue)
-            return false;
-
-        ulong dspTicks = (ulong)dspTicksDouble;
-        if (frameTick <= dspTicks)
-            return false;
-
-        offsetTick = frameTick - dspTicks;
-        if (previousFrameTick == 0UL)
-            previousFrameTick = frameTick;
-
-        Write(_asyncPrevFrameTick, 0, previousFrameTick);
-        Write(_asyncCurrFrameTick, 0, frameTick);
+        offsetTick = frameTick - dspTick;
         Write(_asyncOffsetTick, 0, offsetTick);
         Write(_asyncOffsetTickUpdated, 0, (byte)1);
         return true;
     }
 
-    internal void SetAsyncTargetTick(ulong targetTick, ulong offsetTick)
+    internal bool ApplyMobileAsyncInputMasks(
+        ulong heldMask,
+        ulong downMask,
+        ulong upMask,
+        ulong frameMask,
+        ulong frameDownMask,
+        ulong frameUpMask)
     {
-        if (!CanUseOfficialAsyncReplay)
-            return;
-        ulong songTick = targetTick >= offsetTick ? targetTick - offsetTick : 0UL;
-        Write(_asyncTargetSongTick, 0, songTick);
+        if (!EnsureAsyncMaskApi())
+            return false;
+
+        bool ok = ClearHashSet(_asyncKeyMaskObject)
+                  && ClearHashSet(_asyncKeyDownMaskObject)
+                  && ClearHashSet(_asyncKeyUpMaskObject)
+                  && ClearHashSet(_asyncFrameKeyMaskObject)
+                  && ClearHashSet(_asyncFrameKeyDownMaskObject)
+                  && ClearHashSet(_asyncFrameKeyUpMaskObject);
+        if (!ok)
+            return false;
+
+        for (int slot = 0; slot < AsyncKeyLabels.Length; slot++)
+        {
+            ulong bit = 1UL << slot;
+            AsyncKeyCodeValue key = new()
+            {
+                Key = GetTouchRawKey(slot),
+                Label = AsyncKeyLabels[slot],
+            };
+
+            if ((heldMask & bit) != 0UL)
+                ok &= AddHashSet(_asyncKeyMaskObject, key);
+            if ((downMask & bit) != 0UL)
+                ok &= AddHashSet(_asyncKeyDownMaskObject, key);
+            if ((upMask & bit) != 0UL)
+                ok &= AddHashSet(_asyncKeyUpMaskObject, key);
+            if ((frameMask & bit) != 0UL)
+                ok &= AddHashSet(_asyncFrameKeyMaskObject, key);
+            if ((frameDownMask & bit) != 0UL)
+                ok &= AddHashSet(_asyncFrameKeyDownMaskObject, key);
+            if ((frameUpMask & bit) != 0UL)
+                ok &= AddHashSet(_asyncFrameKeyUpMaskObject, key);
+        }
+
+        return ok;
     }
 
-    internal void SetAsyncLastReportedTargetTick(ulong targetTick)
+    internal bool ProcessMobileAsyncInput(nint controller, ulong targetTick)
     {
-        if (CanUseOfficialAsyncReplay)
-            Write(_asyncLastReportedTargetTick, 0, targetTick);
-    }
-
-    /// <summary>调用游戏自己的官方异步输入入口。</summary>
-    internal bool ProcessAsyncInput(nint controller, ulong targetTick)
-    {
-        if (_processKeyInputs == null || controller == 0)
+        if (_processKeyInputs == null || controller == 0 || targetTick == 0UL)
             return false;
 
         try
@@ -685,132 +1128,70 @@ internal unsafe sealed class GameApi
     }
 
     /// <summary>
-    /// 官方状态机返回后重新写入事件时刻的角度。Hit 的末尾会调用普通
-    /// Update_RefreshAngles，把 AsyncInputUtils.AdjustAngle 的结果覆盖成当前帧；
-    /// 因此这里同时调用官方刷新方法，再按官方公式直接回写 angle/cachedAngle，
-    /// 避免出现“判定用了异步时间、小球仍用普通帧时间”的不一致。
+    /// Mirrors the UI exclusion performed by the original mobile touch path.
+    /// A direct Android edge has no Unity Touch instance, so the bridge must
+    /// ask the controller before allowing a Down to become a gameplay key.
+    /// Failure is intentionally fail-closed: an uncertain UI tap must not hit
+    /// a tile.
     /// </summary>
-    internal bool RestoreAsyncAngleToTick(nint controller, ulong targetTick, ulong offsetTick)
+    internal bool IsScreenPointInsideUi(nint controller, float x, float y)
     {
-        if (!CanUseOfficialAsyncReplay
-            || controller == 0
-            || _getChosenPlanet == null
-            || targetTick == 0UL)
+        if (controller == 0
+            || _isScreenPointInsideUiElements == null
+            || !float.IsFinite(x)
+            || !float.IsFinite(y))
         {
-            return false;
+            return true;
         }
 
-        SetAsyncTargetTick(targetTick, offsetTick);
         try
         {
-            nint planet = _getChosenPlanet.Invoke(controller);
-            if (planet == 0)
-                return false;
+            // Android MotionEvent uses a top-left origin; Unity screen-space
+            // UI methods use a bottom-left origin. Keep the raw coordinates
+            // for input capture, but convert only this UI query.
+            int screenHeight = GetScreenHeight();
+            if (screenHeight <= 0)
+                return true;
+            float unityY = screenHeight - y;
+            if (!float.IsFinite(unityY))
+                return true;
 
-            bool refreshed = false;
-            try
-            {
-                if (_asyncRefreshAngles != null)
-                {
-                    _asyncRefreshAngles.Invoke(planet);
-                    refreshed = true;
-                }
-            }
-            catch
-            {
-                // The direct projection below remains the authoritative fallback.
-            }
-
-            try
-            {
-                _updateRefreshAngles?.Invoke(planet);
-            }
-            catch
-            {
-                // Update_RefreshAngles can be absent in older builds.
-            }
-
-            ulong songTick = targetTick >= offsetTick ? targetTick - offsetTick : targetTick;
-            double eventDspTime = songTick / 10_000_000d;
-            double? forcedAngle = ComputeAngle(planet, eventDspTime);
-            if (forcedAngle.HasValue && double.IsFinite(forcedAngle.Value))
-            {
-                SetPlanetAngle(planet, forcedAngle.Value);
-                refreshed = true;
-            }
-
-            return refreshed;
+            Vector2Value point = new() { X = x, Y = unityY };
+            _screenPointArgs[0] = (nint)(&point);
+            return _isScreenPointInsideUiElements.InvokeUnbox<byte>(
+                controller,
+                _screenPointArgs) != 0;
         }
         catch
         {
-            return false;
+            return true;
         }
     }
 
-    /// <summary>
-    /// 以稳定的 AsyncKeyCode slot 设置官方六组 HashSet。
-    /// keyMask 和 frameDependentKeyMask 都保存当前持有状态；四个 edge mask
-    /// 描述本帧（以及同一帧内更早事件组）已经出现的 Down/Up。
-    /// </summary>
-    internal bool ApplyAsyncInputMasks(
-        ulong heldMask,
-        ulong downMask,
-        ulong upMask,
-        ulong frameMask,
-        ulong frameDownMask,
-        ulong frameUpMask)
+    private int GetScreenHeight()
     {
-        if (!EnsureAsyncMaskApi())
-            return false;
-
-        bool ok = true;
-        ok &= ClearHashSet(_asyncKeyMaskObject);
-        ok &= ClearHashSet(_asyncKeyDownMaskObject);
-        ok &= ClearHashSet(_asyncKeyUpMaskObject);
-        ok &= ClearHashSet(_asyncFrameKeyMaskObject);
-        ok &= ClearHashSet(_asyncFrameKeyDownMaskObject);
-        ok &= ClearHashSet(_asyncFrameKeyUpMaskObject);
-
-        for (int slot = 0; slot < AsyncKeyLabels.Length; slot++)
+        try
         {
-            ulong bit = 1UL << slot;
-            AsyncKeyCodeValue key = new()
-            {
-                Key = GetTouchRawKey(slot),
-                Label = AsyncKeyLabels[slot],
-            };
-
-            if ((heldMask & bit) != 0UL)
-                ok &= AddHashSet(_asyncKeyMaskObject, key);
-            if ((frameMask & bit) != 0UL)
-                ok &= AddHashSet(_asyncFrameKeyMaskObject, key);
-            if ((downMask & bit) != 0UL)
-                ok &= AddHashSet(_asyncKeyDownMaskObject, key);
-            if ((frameDownMask & bit) != 0UL)
-                ok &= AddHashSet(_asyncFrameKeyDownMaskObject, key);
-            if ((upMask & bit) != 0UL)
-                ok &= AddHashSet(_asyncKeyUpMaskObject, key);
-            if ((frameUpMask & bit) != 0UL)
-                ok &= AddHashSet(_asyncFrameKeyUpMaskObject, key);
+            return _getScreenHeight?.InvokeStaticUnbox<int>() ?? 0;
         }
-
-        return ok;
+        catch
+        {
+            return 0;
+        }
     }
 
-    internal void ClearAsyncInputEdges()
+    internal void ClearMobileAsyncInputState()
+    {
+        ClearMobileAsyncInputMasks();
+        Write(_asyncTargetSongTick, 0, 0UL);
+        Write(_asyncLastReportedTargetTick, 0, 0UL);
+    }
+
+    internal void ClearMobileAsyncInputMasks()
     {
         if (!EnsureAsyncMaskApi())
             return;
-        ClearHashSet(_asyncKeyDownMaskObject);
-        ClearHashSet(_asyncKeyUpMaskObject);
-        ClearHashSet(_asyncFrameKeyDownMaskObject);
-        ClearHashSet(_asyncFrameKeyUpMaskObject);
-    }
 
-    internal void ClearAsyncInputMasks()
-    {
-        if (!EnsureAsyncMaskApi())
-            return;
         ClearHashSet(_asyncKeyMaskObject);
         ClearHashSet(_asyncKeyDownMaskObject);
         ClearHashSet(_asyncKeyUpMaskObject);
@@ -819,57 +1200,16 @@ internal unsafe sealed class GameApi
         ClearHashSet(_asyncFrameKeyUpMaskObject);
     }
 
-    /// <summary>
-    /// 清理官方静态状态。暂停、重开、场景切换和 Mod 卸载都必须调用，避免旧的
-    /// keyMask 或 offsetTick 影响下一段歌曲。
-    /// </summary>
-    internal void ResetAsyncInputState()
-    {
-        if (!CanUseOfficialAsyncReplay)
-            return;
-
-        ClearAsyncInputMasks();
-        Write(_asyncCurrFrameTick, 0, 0UL);
-        Write(_asyncPrevFrameTick, 0, 0UL);
-        Write(_asyncTargetSongTick, 0, 0UL);
-        Write(_asyncOffsetTick, 0, 0UL);
-        Write(_asyncOffsetTickUpdated, 0, (byte)0);
-        Write(_asyncLastReportedTargetTick, 0, 0UL);
-    }
-
-    /// <summary>
-    /// 切换官方 RDInput 的 regular/async 输入类型。只在主线程短暂开启，避免污染菜单输入。
-    /// </summary>
-    internal bool SetAsyncInputTypes(bool enabled)
-    {
-        if (_rdInputTypeActive == null
-            || _rdInputKeyboardInput == null
-            || _rdInputKeyboardLeft == null
-            || _rdInputKeyboardRight == null
-            || _rdInputAsyncKeyboard == null
-            || _rdInputAsyncKeyboardLeft == null
-            || _rdInputAsyncKeyboardRight == null)
-        {
-            return false;
-        }
-
-        bool ok = true;
-        ok &= SetInputTypeActive(_rdInputKeyboardInput, !enabled);
-        ok &= SetInputTypeActive(_rdInputKeyboardLeft, !enabled);
-        ok &= SetInputTypeActive(_rdInputKeyboardRight, !enabled);
-        ok &= SetInputTypeActive(_rdInputAsyncKeyboard, enabled);
-        ok &= SetInputTypeActive(_rdInputAsyncKeyboardLeft, enabled);
-        ok &= SetInputTypeActive(_rdInputAsyncKeyboardRight, enabled);
-        return ok;
-    }
-
     private bool EnsureAsyncMaskApi()
     {
-        if (!CanUseOfficialAsyncReplay)
+        if (_asyncKeyMask == null
+            || _asyncKeyDownMask == null
+            || _asyncKeyUpMask == null
+            || _asyncFrameKeyMask == null
+            || _asyncFrameKeyDownMask == null
+            || _asyncFrameKeyUpMask == null)
             return false;
 
-        // AsyncInputManager 的六个 HashSet 是静态只读实例。它们在 IL2CPP
-        // 域生命周期内不会改变，缓存后每个事件批次无需重复读取字段/解析类型。
         if (_asyncKeyMaskObject != 0
             && _asyncKeyDownMaskObject != 0
             && _asyncKeyUpMaskObject != 0
@@ -888,7 +1228,6 @@ internal unsafe sealed class GameApi
         _asyncFrameKeyMaskObject = Read(_asyncFrameKeyMask, 0, nint.Zero);
         _asyncFrameKeyDownMaskObject = Read(_asyncFrameKeyDownMask, 0, nint.Zero);
         _asyncFrameKeyUpMaskObject = Read(_asyncFrameKeyUpMask, 0, nint.Zero);
-
         if (_asyncKeyMaskObject == 0
             || _asyncKeyDownMaskObject == 0
             || _asyncKeyUpMaskObject == 0
@@ -899,13 +1238,9 @@ internal unsafe sealed class GameApi
             return false;
         }
 
-        if (_hashSetAdd == null || _hashSetClear == null)
-        {
-            IRuntimeClass? hashSetClass = RuntimeManager.GetObjectClass(_asyncKeyMaskObject);
-            _hashSetAdd = hashSetClass?.GetMethod("Add", 1);
-            _hashSetClear = hashSetClass?.GetMethod("Clear", 0);
-        }
-
+        IRuntimeClass? hashSetClass = RuntimeManager.GetObjectClass(_asyncKeyMaskObject);
+        _hashSetAdd = hashSetClass?.GetMethod("Add", 1);
+        _hashSetClear = hashSetClass?.GetMethod("Clear", 0);
         return _hashSetAdd != null && _hashSetClear != null;
     }
 
@@ -949,16 +1284,8 @@ internal unsafe sealed class GameApi
         return true;
     }
 
-    /// <summary>
-    /// 写回行星角度。
-    /// <c>cachedAngle</c> 必须与 <c>angle</c> 同步写入 —— 游戏在多处用它判断角度是否被外部改动，
-    /// 只写 <c>angle</c> 会导致位置在下一帧被回滚。
-    /// </summary>
-    internal void SetPlanetAngle(nint planet, double angle)
-    {
-        Write(_planetAngle, planet, angle);
-        Write(_planetCachedAngle, planet, angle);
-    }
+    private static ushort GetTouchRawKey(int slot)
+        => (ushort)(AsyncTouchRawBase + slot);
 
     // ── 核心公式 ───────────────────────────────────────────────
 
