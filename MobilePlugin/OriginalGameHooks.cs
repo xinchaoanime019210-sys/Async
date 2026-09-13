@@ -75,6 +75,25 @@ internal static partial class OriginalGameHooks
             Uninstall_OriginalSetPaused,
             Abandon_OriginalSetPaused);
 
+        // The APK keeps the PC UpdateSetting case but filters the actual
+        // button out of PauseMenuSettings on Android. This optional hook only
+        // appends that native button; failure must not disable gameplay input.
+        _ = TryInstall(
+            "SettingsMenu.GenerateSettings",
+            Install_OriginalSettingsMenuGenerateSettings,
+            Uninstall_OriginalSettingsMenuGenerateSettings,
+            Abandon_OriginalSettingsMenuGenerateSettings);
+        _ = TryInstall(
+            "SettingsMenu.UpdateSetting",
+            Install_OriginalSettingsMenuUpdateSetting,
+            Uninstall_OriginalSettingsMenuUpdateSetting,
+            Abandon_OriginalSettingsMenuUpdateSetting);
+        _ = TryInstall(
+            "PauseSettingButton.GetDescriptionText",
+            Install_OriginalPauseSettingGetDescriptionText,
+            Uninstall_OriginalPauseSettingGetDescriptionText,
+            Abandon_OriginalPauseSettingGetDescriptionText);
+
         if (!ok)
         {
             Logger.Error(LogTag,
@@ -346,6 +365,66 @@ internal static partial class OriginalGameHooks
         }
     }
 
+    [UnmanagedHook(
+        "Assembly-CSharp.dll",
+        "SettingsMenu",
+        "GenerateSettings",
+        ParameterCount = 0)]
+    private static void OriginalSettingsMenuGenerateSettings(nint instance, nint methodInfo)
+    {
+        OriginalSettingsMenuGenerateSettingsOriginal(instance, methodInfo);
+        try
+        {
+            _plugin?.AddOriginalAsyncSetting(instance);
+        }
+        catch (Exception exception)
+        {
+            Logger.Warn(LogTag, $"Native async setting injection failed: {exception.Message}");
+        }
+    }
+
+    [UnmanagedHook(
+        "Assembly-CSharp.dll",
+        "SettingsMenu",
+        "UpdateSetting",
+        ParameterCount = 2)]
+    private static void OriginalSettingsMenuUpdateSetting(
+        nint instance,
+        nint setting,
+        int action,
+        nint methodInfo)
+    {
+        OriginalSettingsMenuUpdateSettingOriginal(instance, setting, action, methodInfo);
+        try
+        {
+            _plugin?.RestoreAsyncSettingDescription(instance, setting);
+        }
+        catch (Exception exception)
+        {
+            Logger.Warn(LogTag, $"Async setting description refresh failed: {exception.Message}");
+        }
+    }
+
+    [UnmanagedHook(
+        "Assembly-CSharp.dll",
+        "PauseSettingButton",
+        "GetDescriptionText",
+        ParameterCount = 0)]
+    private static nint OriginalPauseSettingGetDescriptionText(nint instance, nint methodInfo)
+    {
+        try
+        {
+            if (_plugin?.TryGetAsyncSettingDescription(instance, out nint description) == true)
+                return description;
+        }
+        catch (Exception exception)
+        {
+            Logger.Warn(LogTag, $"Async setting description lookup failed: {exception.Message}");
+        }
+
+        return OriginalPauseSettingGetDescriptionTextOriginal(instance, methodInfo);
+    }
+
     // ── generated hook cleanup ───────────────────────────────────────────
 
     private static void Uninstall_OriginalAsyncInputIsActive()
@@ -429,6 +508,33 @@ internal static partial class OriginalGameHooks
         _OriginalSetPaused_wrap = null;
     }
 
+    private static void Uninstall_OriginalSettingsMenuGenerateSettings()
+    {
+        if (_OriginalSettingsMenuGenerateSettings_origPtr == nint.Zero) return;
+        HookHelper.Unhook(_OriginalSettingsMenuGenerateSettings_origPtr);
+        _OriginalSettingsMenuGenerateSettings_origPtr = nint.Zero;
+        _OriginalSettingsMenuGenerateSettings_orig = null;
+        _OriginalSettingsMenuGenerateSettings_wrap = null;
+    }
+
+    private static void Uninstall_OriginalSettingsMenuUpdateSetting()
+    {
+        if (_OriginalSettingsMenuUpdateSetting_origPtr == nint.Zero) return;
+        HookHelper.Unhook(_OriginalSettingsMenuUpdateSetting_origPtr);
+        _OriginalSettingsMenuUpdateSetting_origPtr = nint.Zero;
+        _OriginalSettingsMenuUpdateSetting_orig = null;
+        _OriginalSettingsMenuUpdateSetting_wrap = null;
+    }
+
+    private static void Uninstall_OriginalPauseSettingGetDescriptionText()
+    {
+        if (_OriginalPauseSettingGetDescriptionText_origPtr == nint.Zero) return;
+        HookHelper.Unhook(_OriginalPauseSettingGetDescriptionText_origPtr);
+        _OriginalPauseSettingGetDescriptionText_origPtr = nint.Zero;
+        _OriginalPauseSettingGetDescriptionText_orig = null;
+        _OriginalPauseSettingGetDescriptionText_wrap = null;
+    }
+
     private static void Abandon_OriginalAsyncInputIsActive()
     {
         _OriginalAsyncInputIsActive_origPtr = nint.Zero;
@@ -490,5 +596,26 @@ internal static partial class OriginalGameHooks
         _OriginalSetPaused_origPtr = nint.Zero;
         _OriginalSetPaused_orig = null;
         _OriginalSetPaused_wrap = null;
+    }
+
+    private static void Abandon_OriginalSettingsMenuGenerateSettings()
+    {
+        _OriginalSettingsMenuGenerateSettings_origPtr = nint.Zero;
+        _OriginalSettingsMenuGenerateSettings_orig = null;
+        _OriginalSettingsMenuGenerateSettings_wrap = null;
+    }
+
+    private static void Abandon_OriginalSettingsMenuUpdateSetting()
+    {
+        _OriginalSettingsMenuUpdateSetting_origPtr = nint.Zero;
+        _OriginalSettingsMenuUpdateSetting_orig = null;
+        _OriginalSettingsMenuUpdateSetting_wrap = null;
+    }
+
+    private static void Abandon_OriginalPauseSettingGetDescriptionText()
+    {
+        _OriginalPauseSettingGetDescriptionText_origPtr = nint.Zero;
+        _OriginalPauseSettingGetDescriptionText_orig = null;
+        _OriginalPauseSettingGetDescriptionText_wrap = null;
     }
 }

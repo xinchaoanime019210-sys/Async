@@ -250,6 +250,17 @@ internal unsafe sealed class GameApi
         && (_controllerCurrentState != null || _getControllerState != null)
         && _rdInputGetMain != null;
 
+    // Runtime surface used by the optional native settings-menu parity hook.
+    // It intentionally stays behind this API so the mod never references
+    // Unity or Assembly-CSharp types at compile time.
+    internal IAppDomain RuntimeDomain => _domain;
+
+    internal IRuntimeClass? FindGameClassForMod(string name)
+        => FindClass(name);
+
+    internal IRuntimeClass? FindRuntimeClassForMod(string namespaze, string name)
+        => FindClassInDomain(namespaze, name);
+
     /// <summary>延迟校准页能否按硬件时间戳重算采样角度。</summary>
     internal bool CanAdjustCalibration =>
         _calibrationAngleRadians != null

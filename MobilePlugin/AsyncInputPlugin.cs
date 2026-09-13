@@ -73,6 +73,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     private readonly MobileAsyncBridge _mobileAsyncBridge = new();
     private readonly OriginalAsyncClock _originalAsyncClock = new();
     private readonly OriginalAsyncProducer _originalAsyncProducer = new();
+    private readonly SettingsMenuApi _settingsMenu = new();
     private readonly object _stateLock = new();
     private readonly Dictionary<nint, HoldState> _holdStates = new();
     private readonly Dictionary<nint, Queue<GameInputSource>> _gameInputSources = new();
@@ -182,8 +183,10 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
                 || !CanUseOriginalAsyncChain || _game == null)
                 return false;
 
-            nint controller = _game.GetController();
-            return controller != 0 && !_game.IsPaused(controller);
+            // This is the logical switch exposed by the PC settings menu. It
+            // remains readable while the pause/settings menu is open;
+            // gameplay/capture gating belongs to IsOriginalGameplayContext.
+            return true;
         }
     }
 
@@ -262,6 +265,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             OriginalGameHooks.Uninstall();
             _originalAsyncChainEnabled = false;
             _active = false;
+            _settingsMenu.Reset();
             _game = null;
             throw;
         }
@@ -288,23 +292,57 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         _clock.Reset();
         _mobileAsyncBridge.Reset(_game);
         ResetHoldTracking();
+        _settingsMenu.Reset();
         _game = null;
         Logger.Info(LogTag, "Unloaded");
     }
 
     internal void ObserveOriginalAsyncToggle(bool active)
     {
+        _originalAsyncChainEnabled = active;
+        TouchQueue.SetMobileAsyncCaptureMode(active);
+
         if (active)
+        {
+            ResetClock();
             return;
+        }
 
         // The game's logical switch can be toggled by its desktop warning
         // path. It must not call the missing SkyHook library, but stale mobile
         // edges still need to be discarded at that boundary.
         TouchQueue.Clear();
         _originalAsyncProducer.Reset();
+        _originalGameplaySessionActive = false;
         GameApi? game = _game;
         if (game != null)
+        {
             game.ClearOriginalAsyncInputState();
+            game.SetOriginalAsyncInputTypes(false);
+        }
+    }
+
+    internal void AddOriginalAsyncSetting(nint settingsMenu)
+    {
+        if (_game != null)
+            _settingsMenu.TryAdd(_game, settingsMenu);
+    }
+
+    internal bool TryGetAsyncSettingDescription(nint setting, out nint description)
+    {
+        description = 0;
+        GameApi? game = _game;
+        if (game == null || !_settingsMenu.IsAsyncSetting(setting))
+            return false;
+
+        description = _settingsMenu.GetAsyncDescriptionPointer(game);
+        return description != 0;
+    }
+
+    internal void RestoreAsyncSettingDescription(nint settingsMenu, nint setting)
+    {
+        if (_game != null)
+            _settingsMenu.RestoreAsyncDescription(_game, settingsMenu, setting);
     }
 
     /// <summary>
