@@ -1,0 +1,152 @@
+name: Build and release AsyncInput Mobile
+
+# Every branch/tag push produces an Actions artifact. Only a v* tag creates a
+# GitHub Release; ordinary branch pushes never publish a Release.
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: async-input-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MOD_MANAGER_REPOSITORY: StArraySharp/StArray.ModManager
+  MOD_MANAGER_REF: main
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout AsyncInput
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Checkout StArray.ModManager
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MOD_MANAGER_REPOSITORY }}
+          ref: ${{ env.MOD_MANAGER_REF }}
+          path: dependencies/StArray.ModManager
+
+      - name: Build StArray.ModManager references
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build \
+            dependencies/StArray.ModManager/StArray.ModManager/StArray.ModManager.csproj \
+            --configuration Release
+          dotnet build \
+            dependencies/StArray.ModManager/StArray.ModManager.Android/StArray.ModManager.Android.csproj \
+            --configuration Release
+
+      - name: Prepare build references
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manager_root="dependencies/StArray.ModManager"
+          core_output="$manager_root/StArray.ModManager/bin/Release/net10.0"
+          android_output="$manager_root/StArray.ModManager.Android/bin/Release/net10.0"
+          analyzer_output="$manager_root/StArray.ModManager.Analyzer/bin/Release/netstandard2.0"
+          imgui_dll="$(find "$HOME/.nuget/packages/imgui.net" \
+            -path '*/lib/net8.0/ImGui.NET.dll' -type f | sort -V | tail -n 1)"
+
+          test -f "$core_output/StArray.ModManager.dll"
+          test -f "$android_output/StArray.ModManager.Android.dll"
+          test -f "$analyzer_output/StArray.ModManager.Analyzer.dll"
+          test -f "$imgui_dll"
+
+          mkdir -p References
+          cp "$core_output/StArray.ModManager.dll" References/StArray.ModManager.dll
+          cp "$android_output/StArray.ModManager.Android.dll" References/StArray.ModManager.Android.dll
+          cp "$analyzer_output/StArray.ModManager.Analyzer.dll" References/StArray.ModManager.Analyzer.dll
+          cp "$imgui_dll" References/ImGui.NET.dll
+
+      - name: Build AsyncInput
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION.txt)"
+          test -n "$version"
+          dotnet build MobilePlugin/AsyncInput.csproj \
+            --configuration Release \
+            -p:Version="$version" \
+            -p:InformationalVersion="$version"
+
+      - name: Package mod
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION.txt)"
+          expected_tag="v$version"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match VERSION.txt ($expected_tag)."
+              exit 1
+            fi
+          fi
+
+          python3 package_mod.py
+          zip_path="AsyncInput-$version.zip"
+          test -f "$zip_path"
+          unzip -t "$zip_path"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "tag=$expected_tag" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+          echo "zip_path=$zip_path" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=AsyncInput-${version}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.zip_path }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+          RELEASE_ZIP: ${{ steps.package.outputs.zip_path }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          if tag_commit="$(git rev-list -n 1 "$RELEASE_TAG" 2>/dev/null)"; then
+            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+              echo "::error::Tag $RELEASE_TAG points to $tag_commit, not $GITHUB_SHA."
+              exit 1
+            fi
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$RELEASE_ZIP" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$RELEASE_ZIP" \
+              --verify-tag \
+              --title "AsyncInput Mobile $RELEASE_VERSION" \
+              --generate-notes
+          fi

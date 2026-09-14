@@ -1,3 +1,4 @@
+using System.Reflection;
 using StArray.ModManager.Android.Native;
 using ImGuiNET;
 using StArray.ModManager.Manager;
@@ -74,6 +75,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     private readonly OriginalAsyncClock _originalAsyncClock = new();
     private readonly OriginalAsyncProducer _originalAsyncProducer = new();
     private readonly SettingsMenuApi _settingsMenu = new();
+    private GitHubUpdateService? _updateService;
     private readonly object _stateLock = new();
     private readonly Dictionary<nint, HoldState> _holdStates = new();
     private readonly Dictionary<nint, Queue<GameInputSource>> _gameInputSources = new();
@@ -158,6 +160,9 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     /// <summary>显示调试信息，用于确认重算是否真的生效。</summary>
     public bool ShowDebugHud;
 
+    /// <summary>输出输入生产、时钟和会话边界的详细日志。</summary>
+    public bool ShowDetailedLogs;
+
     public string Id => "AsyncInput";
     public string Name => "Async Input";
     public string Version => "1.0.0";
@@ -235,6 +240,11 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
 
     public void OnLoad()
     {
+        string modDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)
+                              ?? AppContext.BaseDirectory;
+        _updateService = new GitHubUpdateService(modDirectory, Version);
+        _updateService.StartAutomaticCheck();
+
         _game = GameApi.Create();
         if (_game == null)
             throw new InvalidOperationException("ADOFAI IL2CPP runtime or Assembly-CSharp was not found");
@@ -265,6 +275,8 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             OriginalGameHooks.Uninstall();
             _originalAsyncChainEnabled = false;
             _active = false;
+            _updateService?.Dispose();
+            _updateService = null;
             _settingsMenu.Reset();
             _game = null;
             throw;
@@ -292,6 +304,8 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         _clock.Reset();
         _mobileAsyncBridge.Reset(_game);
         ResetHoldTracking();
+        _updateService?.Dispose();
+        _updateService = null;
         _settingsMenu.Reset();
         _game = null;
         Logger.Info(LogTag, "Unloaded");
@@ -314,6 +328,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         TouchQueue.Clear();
         _originalAsyncProducer.Reset();
         _originalGameplaySessionActive = false;
+        DebugLog($"Async toggle: {(active ? "on" : "off")}");
         GameApi? game = _game;
         if (game != null)
         {
@@ -449,7 +464,22 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             return false;
         }
 
+        if (_originalAsyncProducer.LastFlushRawCount > 0
+            || _originalAsyncProducer.LastFlushProducedCount > 0)
+        {
+            DebugLog(
+                $"UpdateInput flush: raw={_originalAsyncProducer.LastFlushRawCount}, "
+                + $"queue={_originalAsyncProducer.LastFlushProducedCount}, "
+                + $"ageMs={_originalAsyncProducer.LastDispatchAgeMilliseconds:F3}");
+        }
+
         return true;
+    }
+
+    internal void DebugLog(string message)
+    {
+        if (ShowDetailedLogs)
+            Logger.Debug(LogTag, message);
     }
 
     internal int GetOriginalAsyncPressCount()
@@ -710,6 +740,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             _mobileAsyncBridge.Reset(_game);
         ResetHoldTracking();
         ResetGameInputSources();
+        DebugLog("Async clock/input session reset");
     }
 
     /// <summary>
@@ -1376,8 +1407,11 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
 
         ImGui.TextWrapped("延迟校准继续使用 APK 原版流程；本分支不改写校准样本。");
 
+        _updateService?.DrawGui();
+
         ImGui.Separator();
         ImGui.Checkbox("显示调试信息", ref ShowDebugHud);
+        ImGui.Checkbox("输出详细日志", ref ShowDetailedLogs);
 
         if (!ShowDebugHud)
             return;
@@ -1433,5 +1467,11 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             _mobileAsyncBridge.ResetStatistics();
             TouchQueue.ResetStatistics();
         }
+    }
+
+    public void OnForegroundGUI(ImDrawListPtr drawList)
+    {
+        if (_active)
+            _updateService?.DrawForegroundNotification();
     }
 }

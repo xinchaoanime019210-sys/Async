@@ -36,8 +36,17 @@ InputEvents
 | 启用异步输入 | 关闭后回到游戏原有输入路径 |
 | 附加偏移 (ms) | 正值判定更早，负值判定更晚 |
 | 显示调试信息 | 显示时钟、生产者和队列统计 |
+| 输出详细日志 | 输出输入边沿、队列 flush 和异步会话边界日志；默认关闭 |
 
 设置保存在 `mods/AsyncInput/settings.json`。
+
+## GitHub 更新
+
+插件会检查公开仓库
+[`iidamie/AsyncInput_Mobile`](https://github.com/iidamie/AsyncInput_Mobile) 的最新
+Release。发现新版本后，可在 Mod 设置页下载并替换 `AsyncInput.dll`，重启游戏后生效。
+更新包会校验 HTTPS 地址、压缩包大小、程序集名称和固定的
+`AsyncInput/AsyncInput.dll` 路径。
 
 ## 依赖与构建
 
@@ -62,3 +71,8 @@ python3 package_mod.py
 `OriginalAsyncClock` 把 Android 单调时间转换为 `SkyHookEvent.GetTimeInTicks()` 使用的
 `DateTime` tick，并保留 Iridium v3 的有用部分：检测大幅 DSP 时间跳变（XRUN）并用 30
 个样本修正持续偏移。音频事件消费仍完全使用 APK 原有逻辑。
+
+## 致谢
+
+- [StArraySharp/StArray.ModManager](https://github.com/StArraySharp/StArray.ModManager)：提供 Mod 加载、Android 输入事件和运行时 Hook 支持。
+- [Xbodwf/Iridium](https://github.com/Xbodwf/Iridium)：提供异步输入时钟校正和性能优化思路参考。
