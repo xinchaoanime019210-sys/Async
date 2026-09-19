@@ -128,6 +128,9 @@ internal unsafe sealed class GameApi
     private const int ButtonStateWentDown = 0;
     private const int ButtonStateWentUp = 2;
 
+    internal readonly System.Collections.Concurrent.ConcurrentQueue<SkyHookEventValue> LocalQueue = new();
+
+
     [StructLayout(LayoutKind.Sequential)]
     private struct AsyncKeyCodeValue
     {
@@ -234,8 +237,6 @@ internal unsafe sealed class GameApi
     /// </summary>
     internal bool CanUseOriginalAsyncChain =>
         _asyncInputManagerClass != null
-        && _asyncKeyQueue != null
-        && _asyncClearKeys != null
         && _asyncCurrFrameTick != null
         && _asyncPrevFrameTick != null
         && _asyncOffsetTick != null
@@ -783,12 +784,11 @@ internal unsafe sealed class GameApi
     /// <c>ConcurrentQueue&lt;SkyHookEvent&gt;</c> and its closed generic methods.
     /// The queue is a static field, so no managed mirror is needed.
     /// </summary>
-    internal bool InitializeOriginalAsyncQueue()
-    {
-        if (!CanUseOriginalAsyncChain)
-            return false;
-        return EnsureOriginalAsyncQueueApi();
-    }
+internal bool InitializeOriginalAsyncQueue()
+{
+    return CanUseOriginalAsyncChain; // Bỏ qua EnsureOriginalAsyncQueueApi()
+}
+
 
     /// <summary>
     /// Enqueues one value into the game's own SkyHook event queue. The caller
@@ -801,8 +801,8 @@ internal unsafe sealed class GameApi
         bool pressed,
         int slot)
     {
-        if (dateTimeTicks <= 0L || slot < 0 || slot >= 16
-            || !EnsureOriginalAsyncQueueApi())
+        // 1. Đã xóa EnsureOriginalAsyncQueueApi
+        if (dateTimeTicks <= 0L || slot < 0 || slot >= 16)
         {
             return false;
         }
@@ -850,17 +850,11 @@ internal unsafe sealed class GameApi
             Key = GetTouchRawKey(slot),
         };
 
-        try
-        {
-            _asyncKeyEventArgs[0] = (nint)(&value);
-            _asyncKeyQueueEnqueue!.Invoke(_asyncKeyQueueObject, _asyncKeyEventArgs);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
+        // 2. Đã thay thế khối try...catch bằng LocalQueue
+        LocalQueue.Enqueue(value);
+        return true;
     }
+
 
     /// <summary>清空游戏原生异步输入状态，只用于会话边界或故障复位。</summary>
     internal void ClearOriginalAsyncInputState()
