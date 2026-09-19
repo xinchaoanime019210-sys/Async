@@ -144,7 +144,7 @@ internal unsafe sealed class GameApi
     /// trailing alignment padding after Key.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    private struct SkyHookEventValue
+    internal struct SkyHookEventValue
     {
         public long TimeSec;
         public uint TimeSubsecNano;
