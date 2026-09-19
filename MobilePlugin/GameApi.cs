@@ -1449,3 +1449,44 @@ internal bool InitializeOriginalAsyncQueue()
         }
     }
 }
+    internal unsafe void ProcessLocalQueue()
+    {
+        if (_hashSetClear == null || _hashSetAdd == null) return;
+
+        // 1. Dọn dẹp trạng thái phím (Down/Up) của khung hình trước
+        _hashSetClear.Invoke(_asyncKeyDownMaskObject, Array.Empty<nint>());
+        _hashSetClear.Invoke(_asyncKeyUpMaskObject, Array.Empty<nint>());
+        _hashSetClear.Invoke(_asyncFrameKeyDownMaskObject, Array.Empty<nint>());
+        _hashSetClear.Invoke(_asyncFrameKeyUpMaskObject, Array.Empty<nint>());
+
+        // 2. Lấy toàn bộ sự kiện chạm màn hình từ hàng đợi giả (LocalQueue)
+        while (LocalQueue.TryDequeue(out var ev))
+        {
+            AsyncKeyCodeValue keyVal = new AsyncKeyCodeValue
+            {
+                Key = ev.Key,
+                Label = ev.Label
+            };
+            
+            fixed (AsyncKeyCodeValue* ptr = &keyVal)
+            {
+                _hashSetKeyArgs[0] = (nint)ptr;
+
+                if (ev.Type == 0) // Trạng thái: Chạm vào (Pressed)
+                {
+                    _hashSetAdd.Invoke(_asyncKeyDownMaskObject, _hashSetKeyArgs);
+                    _hashSetAdd.Invoke(_asyncFrameKeyDownMaskObject, _hashSetKeyArgs);
+                    
+                    // Thêm vào danh sách các phím đang được giữ
+                    _hashSetAdd.Invoke(_asyncKeyMaskObject, _hashSetKeyArgs);
+                    _hashSetAdd.Invoke(_asyncFrameKeyMaskObject, _hashSetKeyArgs);
+                }
+                else // Trạng thái: Thả tay ra (Released)
+                {
+                    _hashSetAdd.Invoke(_asyncKeyUpMaskObject, _hashSetKeyArgs);
+                    _hashSetAdd.Invoke(_asyncFrameKeyUpMaskObject, _hashSetKeyArgs);
+                }
+            }
+        }
+    }
+
