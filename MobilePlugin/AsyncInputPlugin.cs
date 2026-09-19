@@ -464,6 +464,35 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             return false;
         }
 
+        // ==========================================
+        // DÁN BƯỚC 4 VÀO ĐÂY: Xả hàng đợi và nạp vào game
+        // ==========================================
+        game.ProcessLocalQueue(); 
+        // ==========================================
+
+        if (_originalAsyncProducer.LastFlushRawCount > 0
+            || _originalAsyncProducer.LastFlushProducedCount > 0)
+        {
+            DebugLog(
+                $"UpdateInput flush: raw={_originalAsyncProducer.LastFlushRawCount}, "
+                + $"queue={_originalAsyncProducer.LastFlushProducedCount}, "
+                + $"ageMs={_originalAsyncProducer.LastDispatchAgeMilliseconds:F3}");
+        }
+
+        return true;
+    }
+
+
+        if (!_originalAsyncProducer.Flush(
+                game,
+                controller,
+                _originalAsyncClock,
+                OffsetMs))
+        {
+            DisableOriginalAsyncChain("Android event producer could not feed the original queue");
+            return false;
+        }
+
         if (_originalAsyncProducer.LastFlushRawCount > 0
             || _originalAsyncProducer.LastFlushProducedCount > 0)
         {
