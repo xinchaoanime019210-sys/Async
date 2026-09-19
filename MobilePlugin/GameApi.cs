@@ -1489,6 +1489,5 @@ internal bool InitializeOriginalAsyncQueue()
         }
     }
 
-    }
 
 } // <-- Dấu } kết thúc class GameApi nằm ở TẬN CÙNG CỦA FILE
