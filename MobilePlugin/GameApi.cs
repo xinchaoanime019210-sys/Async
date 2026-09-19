@@ -1385,7 +1385,7 @@ internal bool InitializeOriginalAsyncQueue()
         return conductor != 0 ? conductor : GetConductor();
     }
 
-    // ── 反射辅助 ───────────────────────────────────────────────
+      // ── 反射辅助 ───────────────────────────────────────────────
 
     private IRuntimeClass RequireClass(string name)
     {
@@ -1448,7 +1448,7 @@ internal bool InitializeOriginalAsyncQueue()
         {
         }
     }
-}
+
     internal unsafe void ProcessLocalQueue()
     {
         if (_hashSetClear == null || _hashSetAdd == null) return;
@@ -1490,3 +1490,4 @@ internal bool InitializeOriginalAsyncQueue()
         }
     }
 
+} // <-- Dấu } kết thúc class GameApi nằm ở TẬN CÙNG CỦA FILE
