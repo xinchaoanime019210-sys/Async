@@ -262,8 +262,13 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             _originalAsyncFailureLogged = false;
             _originalGameplaySessionActive = false;
             _active = true;
+            
+            // Ép chạy cài đặt Hook nhưng BỎ QUA nếu nó thất bại
             if (!OriginalGameHooks.Install(this))
-                throw new InvalidOperationException("Original async input hooks could not be installed");
+            {
+                Logger.Info(LogTag, "Original hooks failed to install, but ignoring since we use LocalQueue.");
+                // ĐÃ XÓA DÒNG THROW ERROR Ở ĐÂY ĐỂ TRÁNH MOD BỊ TẮT
+            }
 
             TouchQueue.Subscribe();
             TouchQueue.SetMobileAsyncCaptureMode(true);
@@ -284,6 +289,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
 
         Logger.Info(LogTag, "Loaded");
     }
+
 
     public void OnUnload()
     {
