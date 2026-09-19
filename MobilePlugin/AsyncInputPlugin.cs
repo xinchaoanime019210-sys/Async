@@ -432,7 +432,7 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
     /// Prepares the game's own UpdateInput call. The return value controls the
     /// temporary touchEnabled override while the APK consumes keyQueue.
     /// </summary>
-    internal bool PrepareOriginalInputUpdate(nint controller)
+      internal bool PrepareOriginalInputUpdate(nint controller)
     {
         GameApi? game = _game;
         if (game == null || controller == 0)
@@ -464,11 +464,8 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
             return false;
         }
 
-        // ==========================================
-        // DÁN BƯỚC 4 VÀO ĐÂY: Xả hàng đợi và nạp vào game
-        // ==========================================
-        game.ProcessLocalQueue(); 
-        // ==========================================
+        // Tích hợp đọc hàng đợi giả
+        game.ProcessLocalQueue();
 
         if (_originalAsyncProducer.LastFlushRawCount > 0
             || _originalAsyncProducer.LastFlushProducedCount > 0)
@@ -482,28 +479,6 @@ public sealed class AsyncInputPlugin : IModPlugin, IModSettings
         return true;
     }
 
-
-        if (!_originalAsyncProducer.Flush(
-                game,
-                controller,
-                _originalAsyncClock,
-                OffsetMs))
-        {
-            DisableOriginalAsyncChain("Android event producer could not feed the original queue");
-            return false;
-        }
-
-        if (_originalAsyncProducer.LastFlushRawCount > 0
-            || _originalAsyncProducer.LastFlushProducedCount > 0)
-        {
-            DebugLog(
-                $"UpdateInput flush: raw={_originalAsyncProducer.LastFlushRawCount}, "
-                + $"queue={_originalAsyncProducer.LastFlushProducedCount}, "
-                + $"ageMs={_originalAsyncProducer.LastDispatchAgeMilliseconds:F3}");
-        }
-
-        return true;
-    }
 
     internal void DebugLog(string message)
     {
