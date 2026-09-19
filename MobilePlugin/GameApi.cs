@@ -1468,26 +1468,27 @@ internal bool InitializeOriginalAsyncQueue()
                 Label = ev.Label
             };
             
-            fixed (AsyncKeyCodeValue* ptr = &keyVal)
-            {
-                _hashSetKeyArgs[0] = (nint)ptr;
+            // Lấy thẳng địa chỉ của keyVal vì nó đã nằm cố định trên stack
+            AsyncKeyCodeValue* ptr = &keyVal;
+            _hashSetKeyArgs[0] = (nint)ptr;
 
-                if (ev.Type == 0) // Trạng thái: Chạm vào (Pressed)
-                {
-                    _hashSetAdd.Invoke(_asyncKeyDownMaskObject, _hashSetKeyArgs);
-                    _hashSetAdd.Invoke(_asyncFrameKeyDownMaskObject, _hashSetKeyArgs);
-                    
-                    // Thêm vào danh sách các phím đang được giữ
-                    _hashSetAdd.Invoke(_asyncKeyMaskObject, _hashSetKeyArgs);
-                    _hashSetAdd.Invoke(_asyncFrameKeyMaskObject, _hashSetKeyArgs);
-                }
-                else // Trạng thái: Thả tay ra (Released)
-                {
-                    _hashSetAdd.Invoke(_asyncKeyUpMaskObject, _hashSetKeyArgs);
-                    _hashSetAdd.Invoke(_asyncFrameKeyUpMaskObject, _hashSetKeyArgs);
-                }
+            if (ev.Type == 0) // Trạng thái: Chạm vào (Pressed)
+            {
+                _hashSetAdd.Invoke(_asyncKeyDownMaskObject, _hashSetKeyArgs);
+                _hashSetAdd.Invoke(_asyncFrameKeyDownMaskObject, _hashSetKeyArgs);
+                
+                // Thêm vào danh sách các phím đang được giữ
+                _hashSetAdd.Invoke(_asyncKeyMaskObject, _hashSetKeyArgs);
+                _hashSetAdd.Invoke(_asyncFrameKeyMaskObject, _hashSetKeyArgs);
+            }
+            else // Trạng thái: Thả tay ra (Released)
+            {
+                _hashSetAdd.Invoke(_asyncKeyUpMaskObject, _hashSetKeyArgs);
+                _hashSetAdd.Invoke(_asyncFrameKeyUpMaskObject, _hashSetKeyArgs);
             }
         }
+    }
+
     }
 
 } // <-- Dấu } kết thúc class GameApi nằm ở TẬN CÙNG CỦA FILE
